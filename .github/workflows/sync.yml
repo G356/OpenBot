@@ -10,16 +10,22 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
+    # ================== 🔑 核心安全配置：只给这个任务写权限 ==================
+    permissions:
+      contents: write
+    # =====================================================================
+
     steps:
       - name: Checkout target repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # 必须设置为 true 以允许向仓库推送更改
           persist-credentials: true
 
       - name: Sync Upstream
         # 使用 GitHub 官方提供的专用同步 Action
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.3
         with:
           target_sync_branch: main        # 你自己 Fork 仓库要同步的分支（如 main 或 master）
           target_repo_token: ${{ secrets.GITHUB_TOKEN }} # 自动生成的临时 Token

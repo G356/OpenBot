@@ -32,6 +32,18 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
   `code_required` (below). A server and a computer must be upgraded together: an older computer has
   no `/sign-in/code`.
 
+### An HTML-only email reaches its trigger as the sender wrote it
+
+An email trigger reads an HTML-only mail by stripping its tags, and the character references stayed:
+the Bot read `AT&amp;T`, `we&#8217;re` and `Q3&nbsp;numbers`. Numeric references, `&amp;`, `&lt;`,
+`&gt;`, `&quot;`, `&apos;` and `&nbsp;` are now decoded, once, so `&amp;lt;` reads as `&lt;`.
+
+### An email in another charset reaches its trigger as the sender wrote it
+
+A base64 or quoted-printable email part was always read as UTF-8, whatever charset its Content-Type
+named, so an `iso-8859-1` mail reached the Bot with every accented letter turned into `�`. Each part
+is now decoded in the charset it names, and a charset the runtime does not know still reads as UTF-8.
+
 ### The Bot's screen opens only when there is something to watch
 
 Asking a Bot a question it answered in words could still open its computer beside the conversation,
@@ -51,6 +63,12 @@ on a still screen, for an action that never happened.
   three — but the Bot was still offered the tools, so it reached for one, was refused, and spent the
   turn saying so. The tools a switch turns off are now withheld from the Bot in the first place.
 
+### A repeated minute in a routine's schedule is described once
+
+A schedule like `0,30,0 9 * * *` fires at 09:00 and 09:30, but the routines page and the model were
+told "Every day at 09:00, 09:00 and 09:30". Repeated minutes are now said once, as repeated weekdays
+already were.
+
 ### An app you have not connected is offered where you are reading
 
 A Bot asked to use an app whose account the person had not connected answered with the name of a
@@ -63,6 +81,12 @@ thing itself — a card naming the app, with a Connect button.
 - It covers an account that was never connected, one disconnected while a call was in flight, and
   access that was withdrawn. An app shared across the deployment still says to ask an administrator,
   since the person reading cannot connect it.
+
+### No-sign-in startup rejects addresses without a host
+
+With `OPENBOT_SINGLE_USER=true`, an address such as `example.com:3010` in `OPENBOT_PUBLIC_URL`,
+`OPENBOT_APP_URL` or `TRUSTED_ORIGINS` now refuses startup. It previously counted as a private
+network address and only warned, even though the missing URL scheme left its host unidentified.
 
 ### A reply's tool calls fold into one line
 
@@ -299,6 +323,20 @@ in a channel is cancelled. GitHub links through a GitHub App's user sign-in, set
 `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` (both or neither); the server refuses to start
 with them and no public URL. Nothing reads the links yet: they are what GitHub alerts and reviews will
 build on. Migration `0053_identity_links` only adds tables.
+
+### A credential written as the word after a flag is redacted
+
+`docker login -p secret`, `sshpass -p secret` and `redis-cli -a secret` were recorded with the
+password in clear: the rules recognised a flag whose name says what it carries, and mysql's attached
+`-psecret`, but not a credential passed as the word after the flag. `redis-cli -ahunter2` was worse —
+the attached form reads as a flag called `-asecret`, so the rule for a flag named after a secret
+redacted the word *after* it and left the password. A URL with no user, `redis://:secret@host`, was
+missed the same way, and so were curl's proxy credentials in `--proxy-user` where `-u` and `--user`
+were covered. All of them are now redacted, in the command kept for Action Recording and in the copy
+exported to a telemetry collector. A password separated from `-p` by a space is left alone: mysql
+asks for it at the prompt and the word after the flag is the database name. Each of these rules ends where its
+command does, so the port in `sshpass -p secret ssh -p 2222`, or in a `docker run -p 8080:80` on the
+line after a `docker login`, is left alone.
 
 ### An app's account can belong to the team
 

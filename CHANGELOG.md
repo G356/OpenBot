@@ -35,6 +35,61 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
   request for an administrator to switch on a work app, grant it to a Bot, or connect a Shared app's
   team account is kept, with who answered it and when. It starts empty and nothing is backfilled.
 
+### A Bot can send, draft and reply in Gmail
+
+OpenBot left out every Composio action that takes a file, because a Bot has no way to supply one.
+That also left out actions where the file is optional, such as an email's attachment, so Gmail's
+send, draft, reply and update-draft actions never appeared and a Bot could read mail but not send
+it. These actions are now offered without the optional file, and a call that includes one anyway is
+refused with a message saying to try again without it. An action that cannot run without a file,
+such as uploading one to Google Drive, is still left out. For an app that is already on, press
+Refresh tools on its page in Admin to list the new actions, then grant them to a Bot as usual.
+
+### Connect works for an app Composio already holds your account for
+
+Pressing Connect on a Composio app, from a conversation's Connect card or from Connections, could end
+in a refusal saying Composio already held a connected account for the app and that disconnecting it
+would clear the way. The app showed as not connected, so there was nothing to disconnect. This
+happened when Composio held the account and OpenBot had no record of it: on a fresh or upgraded
+install, or on a second local install signing in as the same person with the same Composio key. Connect
+now asks Composio again, records the account it holds, and shows the app as connected, the same way
+opening the app's page already did. A Shared app's team account is still recorded only by an admin.
+If Composio then reports no account after all, Connect says nothing was connected and asks you to
+press it again. It no longer tells you to disconnect anything.
+
+### A Bot with an app or web research can use its browser in a conversation again
+
+A Bot that held any app or research tool, such as Parallel Search, could not open a page, click or
+type in a conversation: every browser and computer step came back as unavailable, and the Bot
+fetched the page some other way instead. Its browser now works beside those tools, as it does for a
+Bot that holds none. Routines and other unattended turns are unchanged.
+
+### An app a Bot could not use asks to be connected once
+
+When a Bot reached for an app the person had not connected, such as Airtable, the conversation drew
+the Connect card twice, and still did after a reload. The built-in LangGraph Bot now names the message
+its tool calls belong to the way the conversation store does, so a conversation no longer keeps a
+second copy of every tool call, and a conversation that already has one draws each call once.
+
+### An app's steps are named for the app, never for the service behind it
+
+A conversation named a Composio app's work after the broker and the vendor's own prefix: "Used
+Composio Airtable", then "Airtable list bases". It now says "Used Airtable", and each step reads as
+the action, "List bases", with the app beside it. An Arcade app is named the same way, as the app
+rather than `arcade-Gmail`.
+
+### An app a Bot cannot use yet asks once per turn
+
+When a Bot's call to an unconnected app was refused, the Bot often also asked to show that app's
+card, and the conversation drew the same Connect card twice. Each app's card is now drawn once per
+turn; asking again in a new message can draw it again.
+
+### The Computer panel shows the Bot's screen when it opens
+
+Opening the Computer panel beside a conversation could leave it on "Waiting for the Bot's screen…"
+while the Bot browsed, because the panel slid in from off-screen and the screen counted as out of
+view for as long as it stayed open. The panel now starts showing the screen once it has opened.
+
 ### Plainer words, and one word for each thing
 
 OpenBot now says **Bot** everywhere a person reads it, where screens used to mix Bot, agent, coworker

@@ -11,7 +11,9 @@ import {
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import {
+  COMPONENT_GUIDANCE,
   type ComputerGuidance,
+  ORCHESTRATION_GUIDANCE,
   PROVENANCE_GUIDANCE,
 } from "@openbot/shared/bot-prompt";
 import {
@@ -187,9 +189,50 @@ export function standingRoleMessage(
        * "Investigate policies, transaction monitoring, and control evidence."
        */
       PROVENANCE_GUIDANCE,
+      // When to answer with a component, which a remote Bot is offered through the run's tools.
+      COMPONENT_GUIDANCE,
+      // When to share its work out to subagents, which OpenBot runs for it through the same tools.
+      ORCHESTRATION_GUIDANCE,
       // And for the same reason, how to read the untrusted-content envelope its tool results carry.
       UNTRUSTED_GUIDANCE,
     ].join("\n\n"),
+  };
+}
+
+/**
+ * The guidance {@link standingRoleMessage} ends with, which every Bot OpenBot runs itself is given
+ * anyway (see {@link builtInAgentConfiguration}): left off a role run here so it is not said twice.
+ */
+const STANDING_GUIDANCE = `\n\n${[
+  PROVENANCE_GUIDANCE,
+  COMPONENT_GUIDANCE,
+  ORCHESTRATION_GUIDANCE,
+  UNTRUSTED_GUIDANCE,
+].join("\n\n")}`;
+
+/**
+ * A Bot as OpenBot's own runner builds it, whatever it runs on elsewhere: what a check-in runs.
+ *
+ * A CHECK-IN NEVER CALLS A BOT'S OWN ENDPOINT. A Bot on another framework (a harness, an agent an
+ * admin registered) holds tools of its own there, and OpenBot cannot see them, so it cannot hold them
+ * to reads; a check-in that called the endpoint could act through them with nobody watching. Run
+ * here instead, as that Bot (its name and role, from the same standing role it is sent), on the
+ * deployment's model, with the person's connected tools through OpenBot's own dispatcher, every tool
+ * a check-in can touch is one OpenBot can refuse. The check-in's job is set by OpenBot's own
+ * instruction, so little of the framework's own logic is lost.
+ *
+ * A built-in Bot, or one OpenBot cannot run at all, is returned as it is.
+ */
+export function onOpenBotRunner(agent: RegisteredAgent): RegisteredAgent {
+  if (agent.type !== "remote_ag_ui" && agent.type !== "remote_mastra")
+    return agent;
+  return {
+    id: agent.id,
+    name: agent.name,
+    type: "built_in",
+    systemPrompt: agent.standingMessage.content.endsWith(STANDING_GUIDANCE)
+      ? agent.standingMessage.content.slice(0, -STANDING_GUIDANCE.length)
+      : agent.standingMessage.content,
   };
 }
 
@@ -486,6 +529,10 @@ export function builtInAgentConfiguration(
        * it says comes from its own knowledge, and saying so is the only honest move available.
        */
       PROVENANCE_GUIDANCE,
+      // When to answer with a component. Also unconditional: the tools it names vary, the rule not.
+      COMPONENT_GUIDANCE,
+      // When to give work to subagents. Worded for a run that holds the tool, which most do.
+      ORCHESTRATION_GUIDANCE,
       // How to read the untrusted-content envelope every outside result arrives in.
       UNTRUSTED_GUIDANCE,
       ...(grantedToolGuidance(tools, connectedVendors)
@@ -510,13 +557,24 @@ export function builtInAgentConfiguration(
       ? {
           tools: allTools.map((tool) => ({
             ...tool,
-            execute: (args: unknown, execution?: { toolCallId?: string }) =>
+            execute: (
+              args: unknown,
+              execution?: { toolCallId?: string; abortSignal?: AbortSignal },
+            ) =>
               executeNativeApprovalTool(
                 tool.name,
                 args,
                 execution?.toolCallId,
                 tools.find((granted) => granted.name === tool.name)?.initiator,
-                () => tool.execute(args),
+                () =>
+                  tool.execute(args, {
+                    ...(execution?.toolCallId
+                      ? { toolCallId: execution.toolCallId }
+                      : {}),
+                    ...(execution?.abortSignal
+                      ? { signal: execution.abortSignal }
+                      : {}),
+                  }),
               ),
           })),
           maxSteps: TOOL_STEPS,
@@ -1501,7 +1559,8 @@ function remoteAgentWithStandingRole(
                 unknown
               >,
             },
-            execute: (args) => tool.execute(args),
+            ...(tool.concurrent ? { concurrent: true } : {}),
+            execute: (args, context) => tool.execute(args, context),
           })),
           initiator,
         ).run(prepared, next);

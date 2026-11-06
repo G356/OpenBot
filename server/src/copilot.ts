@@ -17,6 +17,7 @@ import {
   type ComputerGuidance,
   ORCHESTRATION_GUIDANCE,
   PROVENANCE_GUIDANCE,
+  todayGuidance,
 } from "@openbot/shared/bot-prompt";
 import {
   defaultModelFor,
@@ -43,7 +44,7 @@ import { HeadlessToolsMiddleware } from "@openbot/toolkit/headless-tools";
 import { sanitizeSeededHistory } from "@openbot/toolkit/history-sanitize";
 import { executeNativeApprovalTool } from "@openbot/toolkit/native-approval";
 import { historyOrEmpty } from "@openbot/toolkit/thread-history";
-import { defer, from, switchMap } from "rxjs";
+import { catchError, defer, from, switchMap, throwError } from "rxjs";
 import { z } from "zod";
 import {
   type ActorAgentResolver,
@@ -54,6 +55,7 @@ import {
   type PlanModelConfig,
   planModelForEnvironment,
 } from "./agents/plan-model";
+import { takesModelChoice } from "./agents/harness-model";
 import type { AgentActor } from "./agents/profile-types";
 import {
   OPENBOT_TOOL_LIMIT,
@@ -79,9 +81,8 @@ import type { AgentFetch, StallGuard } from "./channels/stall-guard";
 import type { DeploymentConfig } from "./config";
 import { observeModelConnection } from "./desktop-connection-failure";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
-import type { ProductTelemetry } from "./telemetry/product";
-import { productRuntimeHook } from "./telemetry/product-boundaries";
 import { observeIntelligenceAuthentication } from "./intelligence-client";
+import { capturePassOrigin } from "./intelligence-gateway-proxy";
 import { RemoteLearnedSkillsMiddleware } from "./learning/remote";
 import {
   type AcquireLearnedSkills,
@@ -104,6 +105,10 @@ import {
 } from "./plugins/selection";
 import { grantedToolGuidance, holdsWebSearch } from "./plugins/tools";
 import { corsOrigin } from "./request-trust";
+import type { ProductTelemetry } from "./telemetry/product";
+import { productRuntimeHook } from "./telemetry/product-boundaries";
+import { billingRefusal, providerName } from "./model-billing";
+import { modelSourceFor, type RunChoice } from "./model-catalogue";
 import { inlineToolImages } from "./tool-images";
 import { UNTRUSTED_GUIDANCE } from "./untrusted-content";
 
@@ -285,6 +290,15 @@ export type RuntimeModel = {
   provider: "openai" | "anthropic";
   defaultModel: string;
   plan?: PlanModelConfig;
+  /** How hard this run thinks, only ever one the model takes. Absent: the model's own default. */
+  effort?: string;
+  /** Whether `defaultModel` came from the provider's listing rather than configuration. */
+  listed?: boolean;
+  /**
+   * Whether an operator named `defaultModel` (`BOT_MODEL`, the Desktop setup screen). Named, it is
+   * the default while the credential lists it; otherwise the middle of the provider's line is.
+   */
+  pinned?: boolean;
 };
 
 /** Optional desktop environment values may be present but blank; SDKs treat them as URLs. */
@@ -337,16 +351,16 @@ export function runtimeModelForEnvironment(
       : provider === "anthropic"
         ? defaultModelFor("anthropic")
         : BUILT_IN_OPENAI_FALLBACK_MODEL;
-  const selectedModelApplies =
-    provider === "anthropic" ||
-    ((!selectedProvider || selectedProvider === "openai") &&
-      !!environment.OPENAI_BASE_URL?.trim());
-  return {
-    provider,
-    plan: planModelForEnvironment(environment),
-    defaultModel:
-      selectedModelApplies && selectedModel ? selectedModel : defaultModel,
-  };
+  /*
+   * A model an operator named is the deployment's, on every provider. Nothing injects one any more
+   * (compose leaves `BOT_MODEL` empty when unset, and the Desktop writes it only for a model the
+   * person chose), so set means chosen, and the model list keeps it as the default while the
+   * credential lists it (`model-catalogue.ts`).
+   */
+  const plan = planModelForEnvironment(environment);
+  if (selectedModel)
+    return { provider, plan, defaultModel: selectedModel, pinned: true };
+  return { provider, plan, defaultModel };
 }
 
 /**
@@ -530,6 +544,8 @@ export function builtInAgentConfiguration(
    * `planToolSearch`. Empty sends everything, which is every Bot at or under the floor.
    */
   waiting: ReadonlySet<string> = new Set(),
+  /** When this run is, for the date the prompt ends with. A test pins it. */
+  now: Date = new Date(),
 ): BuiltInAgentConfiguration {
   if (!apiKey && !planModel) {
     return {
@@ -582,7 +598,7 @@ export function builtInAgentConfiguration(
     model: wrapped ?? planModel ?? `${model.provider}/${model.defaultModel}`,
     /*
      * The package's role, then the person's own standing instructions, then what this Bot actually
-     * holds, then the computer.
+     * holds, then the computer, then the date.
      *
      * The grants go BEFORE the computer prose on purpose. That prose is long and emphatic about the
      * browser and mentions connectors nowhere, so a Bot that read it last reached for the browser
@@ -618,8 +634,15 @@ export function builtInAgentConfiguration(
         ? [computerGuidance({ search: holdsWebSearch(tools) })]
         : []),
       ...(learnedSkills?.catalog ? [learnedSkills.catalog] : []),
+      // Last, so everything above stays one prefix a provider can cache. See `todayGuidance`.
+      todayGuidance(now),
     ].join("\n\n"),
     ...(planModel ? {} : { apiKey: apiKey ?? undefined }),
+    // The run's thinking effort, when the person picked one the model takes. A plan's harness is
+    // told through its own run instead (`planChoice`).
+    ...(!planModel && effortProviderOptions(model)
+      ? { providerOptions: effortProviderOptions(model) }
+      : {}),
     /*
      * A run stops after one step unless told otherwise, which for a Bot with tools means it calls
      * one and never speaks: the tool executes, the result arrives, and the run ends before the model
@@ -735,6 +758,11 @@ export async function buildAgents(
    * every Bot this deployment runs itself; the runtime's own map passes {@link isAskedRun}.
    */
   holdsTools?: HoldsTools,
+  /**
+   * The model the person picked for the conversation a run answers in. Appended last for the
+   * positional reason `loadInstructions` gives. Absent, every run uses the deployment's model.
+   */
+  pickedModel?: PickedModel,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -793,6 +821,7 @@ export async function buildAgents(
           acquireLearnedSkills,
           recordToolLimitRefusal,
           holdsTools,
+          pickedModel,
         );
         if (loadPersonalMemory)
           built.use(new PersonalMemoryMiddleware(agent.id, loadPersonalMemory));
@@ -1059,6 +1088,8 @@ async function buildAgent(
   recordToolLimitRefusal?: RecordToolLimitRefusal,
   /** Which runs may hold the Bot's tools. See {@link buildAgents}. */
   holdsTools?: HoldsTools,
+  /** The model the person picked for this conversation. See {@link buildAgents}. */
+  pickedModel?: PickedModel,
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
@@ -1173,6 +1204,27 @@ async function buildAgent(
       handoff,
       initiator,
       holdsTools,
+      /*
+       * The person's model and effort, for the harness this deployment installed when it takes them.
+       * Only a model that came from a listing: otherwise the harness keeps its own configuration.
+       */
+      pickedModel &&
+        takesModelChoice(agent.endpoint) &&
+        process.env.MANAGED_AGENT_TOKEN &&
+        agent.headers?.["x-openbot-agent-token"] ===
+          process.env.MANAGED_AGENT_TOKEN
+        ? async (input) => {
+            const choice = await pickedModel(input);
+            if (!choice?.listed) return undefined;
+            logRunModel(agent.id, input, choice.model, choice.effort, {
+              harness: true,
+            });
+            return {
+              model: choice.model,
+              ...(choice.effort ? { reasoningEffort: choice.effort } : {}),
+            };
+          }
+        : undefined,
     );
   }
 
@@ -1193,10 +1245,11 @@ async function buildAgent(
    * over the limit fails on every message until somebody looks, and nobody looks at what they cannot
    * see. Ported from #948, with the limit read from the API the runtime resolves.
    */
-  const limit = model.plan ? null : toolLimitFor(model, apiKey ?? undefined);
-  const admitTools = (waiting: ReadonlySet<string>) => {
+  const limitFor = (runModel: RuntimeModel) =>
+    runModel.plan ? null : toolLimitFor(runModel, apiKey ?? undefined);
+  const admitTools = (waiting: ReadonlySet<string>, runModel: RuntimeModel) => {
     const capacity =
-      limit ??
+      limitFor(runModel) ??
       (waiting.size > 0
         ? { provider: OPENBOT_TOOL_LIMIT, limit: MODEL_TOOL_LIMIT }
         : null);
@@ -1238,6 +1291,8 @@ async function buildAgent(
     signal?: AbortSignal,
     learnedSkills?: LearnedSkillInvocation,
     pinned?: ReadonlySet<string>,
+    /** The model this run asked for and was allowed, or the deployment's. */
+    runModel: RuntimeModel = model,
   ) => {
     /*
      * What waits behind a search, decided where the run's tools are final. The count includes what
@@ -1253,7 +1308,7 @@ async function buildAgent(
     });
     const configuration = builtInAgentConfiguration(
       agent,
-      model,
+      runModel,
       apiKey,
       tools,
       computerGuidance,
@@ -1266,6 +1321,7 @@ async function buildAgent(
             input,
             new Set(input.tools.map((tool) => tool.name)),
             signal,
+            planChoice(runModel),
           )
         : undefined,
       learnedSkills,
@@ -1277,9 +1333,24 @@ async function buildAgent(
     )
       ? waiting
       : new Set<string>();
-    const admit = admitTools(held);
+    const admit = admitTools(held, runModel);
     return new BuiltInAgentWithSaneHistory(configuration, {
-      observe: observeModelConnection,
+      /*
+       * A provider out of credit or at its spending limit is told as that, with its name and its
+       * own words, rather than as "Forbidden" or a retry count. See `model-billing.ts`.
+       */
+      observe: (stream) =>
+        observeModelConnection(stream).pipe(
+          catchError((error: unknown) =>
+            throwError(
+              () =>
+                billingRefusal(
+                  error,
+                  providerName(modelSourceFor(runModel, process.env)),
+                ) ?? error,
+            ),
+          ),
+        ),
       ...(admit ? { admitTools: admit } : {}),
       ...(held.size > 0 ? { waiting: held } : {}),
       /*
@@ -1304,6 +1375,7 @@ async function buildAgent(
   const whole = withTools(granted);
   // Even a small app grant may need search once the client's tools arrive with the run.
   if (
+    !pickedModel &&
     !narrowing &&
     !handoff &&
     !model.plan &&
@@ -1317,12 +1389,19 @@ async function buildAgent(
     { agentId: agent.id, description: agent.name },
     whole,
     async (input, signal) => {
+      const runModel = await modelForRun(model, input, pickedModel);
+      signal.throwIfAborted();
+      logRunModel(agent.id, input, runModel.defaultModel, runModel.effort, {
+        plan: runModel.plan?.provider,
+      });
       /*
        * A run the runtime makes for itself holds nothing of the Bot's: no grant, no subagent, no
        * handoff, no learned Skill. Built again with none, rather than told not to call them, so a
        * model that asks for one anyway asks for a tool this run does not have. See `isAskedRun`.
+       * It still answers on the conversation's model, which is the one the gate judged and recorded.
        */
-      if (holdsTools && !holdsTools(input)) return withTools([], input, signal);
+      if (holdsTools && !holdsTools(input))
+        return withTools([], input, signal, undefined, undefined, runModel);
       const learnedSkills = await acquireLearnedSkills?.(agent.id, signal);
       signal.throwIfAborted();
       if (
@@ -1353,13 +1432,14 @@ async function buildAgent(
       // Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
       // built for this request keeps that path allocation-for-allocation what it was.
       return !model.plan &&
+        runModel === model &&
         !learnedSkills &&
         tools.length === granted.length &&
         passing.length === 0 &&
         pinned.size === 0 &&
         input.tools.length === 0
         ? whole
-        : withTools(tools, input, signal, learnedSkills, pinned);
+        : withTools(tools, input, signal, learnedSkills, pinned, runModel);
     },
   );
 }
@@ -1634,6 +1714,14 @@ function remoteAgentWithStandingRole(
   initiator?: AuditInitiator,
   /** Which runs may hold the Bot's tools. See {@link buildAgents}. */
   holdsTools?: HoldsTools,
+  /**
+   * The model and effort this run answers on, for a harness this deployment runs that takes them
+   * (`takesModelChoice`). Sent as `forwardedProps.openbotModel`. Absent for every other remote Bot,
+   * which picks its own model.
+   */
+  chooseModel?: (
+    input: RunAgentInput,
+  ) => Promise<{ model: string; reasoningEffort?: string } | undefined>,
 ) {
   const holds = (input: RunAgentInput) => !holdsTools || holdsTools(input);
   /*
@@ -1727,6 +1815,8 @@ function remoteAgentWithStandingRole(
     };
     // Nor one it carried in: a statement copied from another run would still be accepted.
     if (!held) delete forwardedProps.openbotRun;
+    // The model is this deployment's decision, never the request's. Set below when it applies.
+    delete (forwardedProps as Record<string, unknown>).openbotModel;
     /*
      * The same guard a built-in Bot gets in `BuiltInAgentWithSaneHistory`, applied here because a
      * remote Bot never passes through it: this middleware is the last thing between the browser's
@@ -1762,18 +1852,21 @@ function remoteAgentWithStandingRole(
      * either; see `tool-images.ts`.
      */
     return from(
-      (loadAttachment
-        ? inlineAttachments(
-            history,
-            loadAttachment,
-            // The conversation this run is in, which is what decides whose files it may reach.
-            input.threadId,
-            markAttachmentsSent,
-          )
-        : Promise.resolve(history)
-      ).then((inlined) => inlineToolImages(inlined)),
+      Promise.all([
+        (loadAttachment
+          ? inlineAttachments(
+              history,
+              loadAttachment,
+              // The conversation this run is in, which is what decides whose files it may reach.
+              input.threadId,
+              markAttachmentsSent,
+            )
+          : Promise.resolve(history)
+        ).then((inlined) => inlineToolImages(inlined)),
+        chooseModel?.(input),
+      ]),
     ).pipe(
-      switchMap((messages) => {
+      switchMap(([messages, chosenModel]) => {
         const prepared: RunAgentInput = {
           ...input,
           messages: [
@@ -1813,7 +1906,9 @@ function remoteAgentWithStandingRole(
                 ]
               : input.context,
           // Who the Bot is calling back as, so the audit row names it rather than "an agent".
-          forwardedProps,
+          forwardedProps: chosenModel
+            ? { ...forwardedProps, openbotModel: chosenModel }
+            : forwardedProps,
         };
         if (clientTools.length === 0) return next.run(prepared);
         return new HeadlessToolsMiddleware(
@@ -1991,8 +2086,13 @@ export async function resolveRuntimeAgents(
   loadPersonalMemory?: LoadPersonalMemory,
   /** Appended after `loadPersonalMemory`, for the positional reason `loadInstructions` gives. */
   recordToolLimitRefusal?: RecordToolLimitRefusal,
-  /** Appended last, for the same positional reason. See {@link buildAgents}. */
+  /** After `recordToolLimitRefusal`, for the same positional reason. See {@link buildAgents}. */
   holdsTools?: HoldsTools,
+  /**
+   * The model the person picked for the conversation a run answers in. Appended last for the
+   * positional reason `loadInstructions` gives. Absent, every run uses the deployment's model.
+   */
+  pickedModel?: PickedModel,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -2031,7 +2131,100 @@ export async function resolveRuntimeAgents(
     loadPersonalMemory,
     recordToolLimitRefusal,
     holdsTools,
+    pickedModel,
   );
+}
+
+/**
+ * The model the person picked for the conversation this run answers in, already checked against
+ * what the deployment offers, or undefined for the configured one. Read by the server from its own
+ * record of the pick (`channels/model-choice.ts`), never from anything the request carries.
+ */
+export type PickedModel = (
+  input: RunAgentInput,
+) => Promise<RunChoice | undefined>;
+
+/**
+ * The model and effort one run of a Bot uses: the person's pick for this conversation, or the
+ * default, which is the middle of the provider's current line (`model-catalogue.ts`).
+ *
+ * Decided here, on the server, and never by the runtime's own `forwardedProps.model` override. That
+ * one takes any `provider/model` string from the browser and sends it with this deployment's key,
+ * past the allowlist and past the tool-search wrapper this file puts around the model. Here the pick
+ * comes from the server's own record and goes through the same configuration as the default.
+ *
+ * A plan's harness is sent the model only when it came from the plan's own listing, so a plan is
+ * never handed the deployment's configured model name on a guess. See {@link planChoice}.
+ */
+export async function modelForRun(
+  model: RuntimeModel,
+  input: RunAgentInput,
+  pickedModel: PickedModel | undefined,
+): Promise<RuntimeModel> {
+  if (!pickedModel) return model;
+  const choice = await pickedModel(input);
+  if (!choice) return model;
+  if (model.plan && !choice.listed) return model;
+  if (choice.model === model.defaultModel && !choice.effort && !model.plan)
+    return model;
+  return {
+    ...model,
+    defaultModel: choice.model,
+    listed: choice.listed,
+    ...(choice.effort ? { effort: choice.effort } : {}),
+  };
+}
+
+/**
+ * One line per run naming the model and effort it was sent, so an operator can see what a
+ * conversation actually ran on. Ids only: never the prompt, the person, or a credential.
+ */
+function logRunModel(
+  agentId: string,
+  input: RunAgentInput,
+  model: string,
+  effort: string | undefined,
+  via: { plan?: string; harness?: boolean },
+): void {
+  console.info(
+    JSON.stringify({
+      type: "run-model",
+      agentId,
+      runId: input.runId,
+      model,
+      effort: effort ?? null,
+      ...(via.plan ? { plan: via.plan } : {}),
+      ...(via.harness ? { harness: true } : {}),
+    }),
+  );
+}
+
+/**
+ * What a harness is told to run on: the model and effort, as `forwardedProps.openbotModel`. Only
+ * for a model that came from a listing, so the harness's own fallback applies otherwise.
+ */
+export function planChoice(
+  model: RuntimeModel,
+): { model: string; reasoningEffort?: string } | undefined {
+  if (!model.listed) return undefined;
+  return {
+    model: model.defaultModel,
+    ...(model.effort ? { reasoningEffort: model.effort } : {}),
+  };
+}
+
+/**
+ * How a built-in Bot's effort reaches the model: the AI SDK's own provider option, which the
+ * Responses API sends as `reasoning.effort`, Chat Completions (any OpenAI-compatible endpoint,
+ * Google's and xAI's included) as `reasoning_effort`, and Anthropic as `output_config.effort`.
+ */
+export function effortProviderOptions(
+  model: RuntimeModel,
+): Record<string, Record<string, string>> | undefined {
+  if (!model.effort) return undefined;
+  return model.provider === "anthropic"
+    ? { anthropic: { effort: model.effort } }
+    : { openai: { reasoningEffort: model.effort } };
 }
 
 /** What one Bot may call, for the person whose request this is. */
@@ -2258,6 +2451,9 @@ export function mountCopilotRuntime(
         apiUrl: intelligence.apiUrl,
         wsUrl: intelligence.gatewayWsUrl,
         browserWsUrl: intelligence.browserGatewayWsUrl,
+        // Where the browser's address is a path (this server carries the socket, and has no public
+        // URL), the Recorder's capture pass is handed it whole. See intelligence-gateway-proxy.ts.
+        ownOrigin: capturePassOrigin,
         apiKey: intelligence.apiKey,
         getLearningContainerId: async ({
           agentId,

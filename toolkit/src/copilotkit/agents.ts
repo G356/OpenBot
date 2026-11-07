@@ -76,6 +76,13 @@ export type BuiltInAgentHooks = {
   admitTools?: (toolNames: readonly string[]) => string | undefined;
   /** The configured tools that wait behind tool search, which {@link toolNamesSent} leaves out. */
   waiting?: ReadonlySet<string>;
+  /**
+   * Say whose words each message is, where the role alone would say it wrong: another Bot's answer
+   * stored in this Bot's thread as an assistant message. The last thing done to the history before
+   * the provider, after the sanitiser and the attachments, so neither of those reads a re-roled
+   * message as something the person said. Absent, the history goes up as those two left it.
+   */
+  attribute?: (messages: Message[]) => Message[];
 };
 
 /**
@@ -267,7 +274,19 @@ export class BuiltInAgentWithSaneHistory extends BuiltInAgent {
       (input.resume ?? []).map((entry) => entry.interruptId),
     );
     const history = sanitizeSeededHistory(input.messages, answeredByResume);
-    const { inline, observe } = this.hooks;
+    const { inline, observe, attribute } = this.hooks;
+    /*
+     * Last, after both passes that read roles, and only on the way to the model. The approval
+     * continuation keeps the conversation as the thread holds it, and is attributed again when it
+     * resumes. See `BuiltInAgentHooks.attribute`.
+     */
+    const toModel = (messages: Message[]) =>
+      observe(
+        super.run({
+          ...input,
+          messages: attribute ? attribute(messages) : messages,
+        }),
+      );
     /*
      * ALONGSIDE THE GUARD ABOVE, NOT INSTEAD OF IT. One drops a conversation the model provider is
      * going to refuse; this replaces the stored reference a person's attachment arrives as with the
@@ -280,7 +299,7 @@ export class BuiltInAgentWithSaneHistory extends BuiltInAgent {
     if (!inline)
       return nativeApprovalRun(
         { ...input, messages: history },
-        () => observe(super.run({ ...input, messages: history })),
+        () => toModel(history),
         this.scope,
       );
     /*
@@ -296,7 +315,7 @@ export class BuiltInAgentWithSaneHistory extends BuiltInAgent {
         switchMap((messages) =>
           nativeApprovalRun(
             { ...input, messages },
-            () => observe(super.run({ ...input, messages })),
+            () => toModel(messages),
             this.scope,
           ),
         ),
@@ -510,7 +529,8 @@ export class UnavailableAgent extends AbstractAgent {
  * public URL to write before it: the page resolves a path against itself. The runtime also hands the
  * same address to the Recorder in its capture pass, which is not on the page and which the runtime
  * refuses a path for, so a path is made whole on `ownOrigin`, the server's own origin as that caller
- * reached it, whenever the server has one it may name.
+ * reached it, whenever the server has one it may name. Either way a `localhost` address is handed out as
+ * 127.0.0.1, the only loopback the Recorder opens a ws:// gateway at.
  */
 export class IntelligenceKnowingANewThread extends CopilotKitIntelligence {
   readonly #browserClientWsUrl: string | undefined;
@@ -536,9 +556,11 @@ export class IntelligenceKnowingANewThread extends CopilotKitIntelligence {
 
   override ɵgetClientWsUrl(): string {
     const address = this.#browserClientWsUrl ?? super.ɵgetClientWsUrl();
-    if (!address.startsWith("/")) return address;
+    if (!address.startsWith("/")) return atLoopbackAddress(address);
     const origin = this.#ownOrigin?.();
-    return origin ? `${origin.replace(/^http/, "ws")}${address}` : address;
+    return origin
+      ? atLoopbackAddress(`${origin.replace(/^http/, "ws")}${address}`)
+      : address;
   }
 
   /** A thread, or the client's 404 for one nobody has run yet, unprinted. */
@@ -664,6 +686,26 @@ export class IntelligenceKnowingANewThread extends CopilotKitIntelligence {
 const LOCK_CONFLICT_WAIT_MS = 5_000;
 const LOCK_CONFLICT_RETRY_FIRST_MS = 100;
 const LOCK_CONFLICT_RETRY_MAX_MS = 1_000;
+
+/**
+ * A gateway address on `localhost` as 127.0.0.1, and any other as it is.
+ *
+ * The Recorder opens a plain ws:// gateway only at 127.0.0.1 or [::1], never at the name (Decision 21,
+ * `isAllowedGatewayUrl` in shared/recorder-api.ts), and refused OpenBot Desktop's `ws://localhost:<port>` after
+ * Intelligence had already minted the recording's join token. A local gateway answers on 127.0.0.1 wherever it answers
+ * on localhost (Docker publishes its ports there), and the page opens it there as well as it did at the name.
+ */
+function atLoopbackAddress(wsUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(wsUrl);
+  } catch {
+    return wsUrl;
+  }
+  if (url.hostname !== "localhost") return wsUrl;
+  url.hostname = "127.0.0.1";
+  return url.toString();
+}
 
 /**
  * The gateway's client socket, from any of the three addresses the platform names it by.

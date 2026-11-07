@@ -1,6 +1,6 @@
 [package]
 name = "openbot-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "OpenBot Desktop"
 edition = "2021"
 rust-version = "1.90"
@@ -46,11 +46,11 @@ tauri-plugin-opener = "2.5.5"
 tauri-plugin-dialog = "2"
 # Updating a signed Mac build in place. The plugin verifies the minisign signature beside
 # each artifact against the public key in `tauri.conf.json`, so an endpoint that is taken
-# over still cannot hand this app something to install. See `docs/releasing.md`.
+# over still cannot hand this app something to install. See `docs/releasing.md`. The shell
+# drives it (`install_app_update_now`), and restarts into what it wrote with `app.restart`.
 tauri-plugin-updater = "2"
-# Restarting into the version the updater just wrote. The updater can replace the bundle
-# but cannot relaunch it, and an update nobody is running is not an update.
-tauri-plugin-process = "2"
+# Probing a local port without SO_REUSEADDR, which std sets on Unix. See `env::bind_loopbacks`.
+socket2 = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -59,6 +59,17 @@ libc = "0.2"
 # The version Tauri already uses. See `macos_quit` in main.rs.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# Narration on the Mac: on-device speech recognition from the microphone. See `speech/macos.rs`.
+# The same objc2 generation Tauri and wry already use.
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSLocale", "NSOperation", "NSString"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription"] }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioFormat", "AVAudioBuffer", "AVAudioTime", "AVAudioTypes"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+
+# Narration on Windows: the SAPI in-process recognizer. See `speech/sapi.rs`. The version Tauri uses.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Media_Speech", "Win32_System_Com"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

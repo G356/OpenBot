@@ -20,6 +20,7 @@ import AgentOrb from "@/components/agents/orb/agent-orb";
 import { BotsNavBadge } from "@/components/bot-profile/attention";
 import { NavigationTarget } from "@/components/edition/team-features-dialog";
 import { SelfHostBanner } from "@/components/layout/self-host-banner";
+import { UpdateBanner } from "@/components/layout/update-banner";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,6 +39,7 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile";
 import { agentListQueryOptions } from "@/lib/agents/queries";
 import { signOutMutationOptions } from "@/lib/auth/mutations";
+import { useSignOutOffered } from "@/lib/auth/sign-out-offered";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { setBotPausedMutationOptions } from "@/lib/bot-lifecycle/mutations";
 import { botLifecycleQueryOptions } from "@/lib/bot-lifecycle/queries";
@@ -75,6 +77,7 @@ function RailUserMenu() {
   const user = useQuery(currentUserQueryOptions());
   const navigate = useNavigate();
   const signOut = useMutation(signOutMutationOptions(queryClient));
+  const signOutOffered = useSignOutOffered();
   if (!user.data) return null;
   return (
     <DropdownMenu>
@@ -95,19 +98,23 @@ function RailUserMenu() {
             {user.data.name?.trim() || user.data.email}
           </DropdownMenuLabel>
         </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          className="gap-2 px-2 py-1.5"
-          disabled={signOut.isPending}
-          onClick={async () => {
-            await signOut.mutateAsync();
-            await navigate({ to: "/sign" });
-          }}
-          variant="destructive"
-        >
-          <IconLogout />
-          Sign out
-        </DropdownMenuItem>
+        {signOutOffered ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="gap-2 px-2 py-1.5"
+              disabled={signOut.isPending}
+              onClick={async () => {
+                await signOut.mutateAsync();
+                await navigate({ to: "/sign" });
+              }}
+              variant="destructive"
+            >
+              <IconLogout />
+              Sign out
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -436,6 +443,7 @@ export function OpenDotsFrame({ children }: { children: ReactNode }) {
           onToggleNav={() => setNavCollapsed((collapsed) => !collapsed)}
           place={place}
         />
+        <UpdateBanner />
         <SelfHostBanner />
         <div className="relative flex min-h-0 flex-1">
           <main

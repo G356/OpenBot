@@ -21,6 +21,8 @@ from ag_ui.core import EventType, RunErrorEvent, RunFinishedEvent, RunStartedEve
 from ag_ui_claude_sdk import ClaudeAgentAdapter
 from claude_agent_sdk import (
     AssistantMessage,
+    CLIConnectionError,
+    CLINotFoundError,
     EffortLevel,
     HookMatcher,
     ToolResultBlock,
@@ -35,9 +37,35 @@ logger = logging.getLogger(__name__)
 # The efforts `ClaudeAgentOptions.effort` takes (the CLI's `--effort`), read from the SDK itself.
 SDK_EFFORTS = frozenset(get_args(EffortLevel))
 
+AG_UI_TOOL_PREFIX = "mcp__ag_ui__"
+# Every tool of the `ag_ui` server, in Claude Code's permission-rule syntax
+# (https://code.claude.com/docs/en/permissions: "`mcp__puppeteer__*` matches every tool from the
+# `puppeteer` server").
+AG_UI_TOOLS = f"{AG_UI_TOOL_PREFIX}*"
+
+# What a person is told when Claude Code never started, in place of the process error.
+START_FAILED = (
+    "This Bot couldn't start, so it didn't answer. Send your message again, and restart "
+    "OpenBot if it keeps happening."
+)
+
 
 class ModelAuthenticationError(Exception):
     pass
+
+
+def not_started(error):
+    """Whether this is the SDK saying Claude Code's process was never started.
+
+    The SDK raises `CLIConnectionError` from `connect` with these messages (subprocess_cli.py in
+    0.2.152), and also once a running process goes away, which is not a start failure.
+    """
+    return isinstance(error, CLINotFoundError) or (
+        isinstance(error, CLIConnectionError)
+        and str(error).startswith(
+            ("Failed to start Claude Code", "Working directory does not exist")
+        )
+    )
 
 
 def run_model(forwarded_props):
@@ -130,6 +158,17 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
                     options.system_prompt, instructions
                 )
         tool_names = {tool.name for tool in input_data.tools} if input_data else set()
+        # Upstream allows each `ag_ui` tool by name, and the SDK passes the list to Claude Code as
+        # one `--allowedTools` argument, so it grew with every tool a Bot holds. A Bot offered all
+        # of HubSpot, Notion and Calendar is offered hundreds. The `ag_ui` server holds exactly this
+        # run's tools (and the state tool), so one rule for the server allows the same set.
+        options.allowed_tools = [
+            rule
+            for rule in options.allowed_tools
+            if not rule.startswith(AG_UI_TOOL_PREFIX)
+        ]
+        if "ag_ui" in (options.mcp_servers or {}):
+            options.allowed_tools.append(AG_UI_TOOLS)
 
         async def client_result(input_data, tool_use_id, context):
             turn = self._turns.get(thread_id)
@@ -168,17 +207,16 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
             options.setting_sources = []
             options.strict_mcp_config = True
             options.permission_mode = "dontAsk"
-            options.allowed_tools = [
-                f"mcp__ag_ui__{name}" for name in sorted(tool_names)
-            ]
+            options.allowed_tools = [AG_UI_TOOLS] if tool_names else []
             options.mcp_servers = {
                 name: server
                 for name, server in options.mcp_servers.items()
                 if name == "ag_ui"
             }
+            offered = {f"{AG_UI_TOOL_PREFIX}{name}" for name in tool_names}
 
             async def only_offered(input_data, tool_use_id, context):
-                if input_data.get("tool_name") in options.allowed_tools:
+                if input_data.get("tool_name") in offered:
                     return {}
                 return {
                     "hookSpecificOutput": {
@@ -189,6 +227,14 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
                 }
 
             options.hooks["PreToolUse"] = [HookMatcher(hooks=[only_offered])]
+        else:
+            # A full Bot acts through what OpenBot grants it: its computer, its apps, web search,
+            # Routines and `run_subagent`, each under the deployment's policy and audit trail.
+            # Claude Code's own versions (WebSearch, Bash, Read, CronCreate, Agent, RemoteTrigger
+            # and the rest) run in this container instead, ungoverned and unapproved. Left in
+            # view, Claude reached for its own WebSearch, was refused, and told the person to
+            # grant it. No built-ins, as on the model endpoint; OpenBot's tools still load.
+            options.tools = []  # SDK 0.2.152 maps this to --tools "".
         return options
 
     async def _run_query(self, input_data):
@@ -294,6 +340,14 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
                 event = self._keep_failures(event, turn)
                 await turn.queue.put(event)
         except Exception as error:
+            if not_started(error):
+                # Claude Code never ran, so this sentence is all the conversation will show. The
+                # process error ("[Errno 7] Argument list too long") is for the log.
+                logger.error("Claude Code did not start: %s", error)
+                await turn.queue.put(
+                    RunErrorEvent(message=START_FAILED, code="OPENBOT_HARNESS_START_FAILED")
+                )
+                return
             await turn.queue.put(
                 RunErrorEvent(
                     message=str(error),
@@ -329,16 +383,37 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
                 self._model_only
                 and (input_data.forwarded_props or {}).get("openbotAnswerOnly") is True
             )
-            if answer_only:
-                # An SDK query keeps the tools it started with. The last model step must
-                # replay the real collected results in a fresh query with no tools, rather
-                # than resume a query that can keep calling them until the step cap.
-                await self.interrupt(thread_id)
-                input_data = input_data.model_copy(update={"tools": []})
             turn = self._turns.get(thread_id)
             if turn is not None and turn.task.done():
                 self._turns.pop(thread_id)
                 turn = None
+            # An SDK query keeps the tools it started with. On the model endpoint the server
+            # decides each step's tools, and a step that is sent other tools than the running
+            # query holds is answered by a fresh query replaying the real collected results:
+            # the last step is sent none, and a step after `search_tools` is sent what it found.
+            # Resumed instead, the query never holds a found tool, and Claude called it by the
+            # name in the search's text, which is no tool it was given.
+            # A person who wrote after the pending call is answered by a fresh query from the
+            # whole thread. The browser closes a call it will never finish (Stop, a reload, a
+            # tool it only draws) with an "interrupted" result and sends the new message after
+            # it; resuming the waiting query took only that result, so the Bot carried on as if
+            # nothing had been said, and the turn's snapshot then dropped the person's words
+            # from the thread. A continuation that carries only tool results still resumes.
+            person_spoke = (
+                turn is not None
+                and bool(input_data.messages)
+                and input_data.messages[-1].role == "user"
+            )
+            replaced = answer_only or person_spoke or (
+                self._model_only
+                and turn is not None
+                and {tool.name for tool in input_data.tools} != turn.tool_names
+            )
+            if replaced:
+                await self.interrupt(thread_id)
+                turn = None
+            if answer_only:
+                input_data = input_data.model_copy(update={"tools": []})
 
             yield RunStartedEvent(thread_id=thread_id, run_id=run_id)
             if turn is not None:
@@ -363,7 +438,7 @@ class OpenBotClaudeAgentAdapter(ClaudeAgentAdapter):
                     return
             else:
                 if (
-                    not answer_only
+                    not replaced
                     and input_data.messages
                     and input_data.messages[-1].role == "tool"
                 ):

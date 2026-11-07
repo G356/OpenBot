@@ -5,11 +5,11 @@ import { CopilotKitAccount } from "./CopilotKitAccount";
 import { useWindowFitsContent } from "./fitWindow";
 import { DEFAULT_HARNESS, type HarnessChoice } from "./harness";
 import { isHttpEndpointUrl } from "./http-endpoint-url";
-import { IntelligenceOpening } from "./IntelligenceOpening";
 import {
   LocalIntelligence,
   type LocalStartable,
   LocalStatus,
+  type StartOutcome,
   useLocalSequence,
 } from "./LocalIntelligence";
 import {
@@ -24,7 +24,7 @@ import {
   ProviderPicker,
   recordedModel,
 } from "./ProviderPicker";
-import { RuntimeUpdates } from "./RuntimeUpdates";
+import { ShellUpdates } from "./ShellUpdates";
 import { Sections } from "./Sections";
 import { StartFresh } from "./StartFresh";
 import {
@@ -61,11 +61,11 @@ type AlreadyConfigured = {
   };
 };
 
-/** This installation's deployment is on an older release than this app, so Start moves it first. */
+/** This installation is not on this app's own release, so Start upgrades it first. */
 type ReleaseMove = { from: string; to: string };
 type ReleaseOutcome = ReleaseMove & {
   moved: boolean;
-  /** The move did not happen and the previous release started again. */
+  /** The upgrade did not happen and the previous version started again. */
   notice?: Problem | null;
 };
 
@@ -79,12 +79,7 @@ function installationKeyFor(root: string, harness: HarnessChoice | null) {
 
 export function App() {
   useWindowFitsContent();
-  return (
-    <>
-      <Setup />
-      <IntelligenceOpening />
-    </>
-  );
+  return <Setup />;
 }
 
 function Setup() {
@@ -220,9 +215,9 @@ function Setup() {
       if (connected) setLocalConnected(true);
     },
   });
-  // A recorded stack: the dashboard can be opened, from here and from the menus.
+  // A recorded stack: the OpenBot app's page may offer its dashboard (intelligence_bridge.rs).
   const intelligenceOffered = localStack !== null;
-  // What the menus were last told. Starts hidden, so nothing is said before a stack is recorded.
+  // What the shell was last told. Starts hidden, so nothing is said before a stack is recorded.
   const offeredToMenus = useRef({ root: "", offered: false });
   useEffect(() => {
     const last = offeredToMenus.current;
@@ -470,28 +465,57 @@ function Setup() {
     void installLocally(true);
   }, [reinstall, busy]);
 
-  /** Shows the install until it completes, then the AI provider screen. */
+  /*
+   * Start carries on by itself after an install Start asked for, and has not started since. A Start
+   * refused again then is said, rather than installing and starting round in a loop. The ref is for
+   * the Start's own answer; the state is what starts it, through the same go-ahead as auto-start,
+   * so the two never both start it.
+   */
+  const startedAfterReinstall = useRef(false);
+  const [resumingStart, setResumingStart] = useState(false);
+
+  /**
+   * Shows the install until it completes, then the AI provider screen.
+   *
+   * `again` is the install a refused Start asked for. Nothing about the AI connection changed, so
+   * one already saved is not asked for again: Start carries on with it. A saved connection that no
+   * longer works is refused at Start, which sends the person to the AI screen for it.
+   */
   async function installLocally(again = false) {
     setStep("install");
-    if (await beginLocalInstall(again)) {
-      setSteps([]);
-      setStep("model");
+    if (!(await beginLocalInstall(again))) return;
+    setSteps([]);
+    if (
+      again &&
+      !startedAfterReinstall.current &&
+      modelCanStart(chosenModel.current)
+    ) {
+      startedAfterReinstall.current = true;
+      setResumingStart(true);
+      setStep("connect");
+      return;
     }
+    setStep("model");
   }
 
-  /** True when OpenBot started. */
+  /**
+   * Starts OpenBot against a ready Intelligence.
+   *
+   * `started` only when OpenBot started. `deferred` when it has to be installed first: the window
+   * goes to the install, and Start is asked for again after it. `failed` for anything else.
+   */
   async function start(
     nextModel = model,
     intelligence: LocalStartable | null = null,
-  ): Promise<boolean> {
+  ): Promise<StartOutcome> {
     if (!installationReady) {
       setStep("install");
-      return false;
+      return "deferred";
     }
     // OpenBot starts only from a stack its CLI reports ready and licensed.
     if (!intelligence) {
       setStep("connect");
-      return false;
+      return "deferred";
     }
     setBusy(true);
     setFailure(null);
@@ -511,65 +535,50 @@ function Setup() {
         // the window carrying them would be a second list to keep in step with the catalogue.
         harness,
       };
-      // The deployment never runs older than this app: an older release is moved to the app's own
-      // as part of this Start. A move that fails is undone and the release it had starts instead.
-      const due = await invoke<ReleaseMove | null>("app_release_move", {
+      // The installation runs this app's own release: one that does not is upgraded as part of
+      // this Start. An upgrade that fails is undone and the version it had starts instead.
+      const due = await invoke<ReleaseMove | null>("upgrade_due", {
         root: root.trim(),
       }).catch(() => null);
       let outcome: ReleaseOutcome | null = null;
       if (due) {
-        outcome = await invoke<ReleaseOutcome>("follow_app_release", startWith);
+        outcome = await invoke<ReleaseOutcome>("upgrade_and_start", startWith);
       } else {
         await invoke("start_stack", startWith);
       }
       setSteps((current) => settleProgress(current));
       setRunning(true);
       setRecoveryFailure(null);
+      startedAfterReinstall.current = false;
       // The handover, on a first run as on a return: the window becomes OpenBot the moment the
       // stack is up. Recorded first, so a later Start of this installation reads as a return.
       savedLaunch.current = installationKey;
       setStep("connect");
       setRefreshIntelligence(false);
-      // A move that did not happen is said on the running screen first; Show OpenBot hands over.
+      // An upgrade that did not happen is said on the running screen first; Show OpenBot hands over.
       if (outcome?.notice) {
         // The notice says what the rows would: it is the one thing on the screen.
         setSteps([]);
         setReleaseNotice(outcome.notice);
-        return true;
+        return "started";
       }
       await invoke("show_openbot");
-      return true;
+      return "started";
     } catch (error) {
       recoverFromStart(error);
-      return false;
+      // Refused until OpenBot is installed again, which the window now does by itself and then
+      // starts. Only once: refused again straight after that install, it is a failure.
+      return asProblem(error).connection === "installation" &&
+        !startedAfterReinstall.current
+        ? "deferred"
+        : "failed";
     } finally {
       setBusy(false);
+      // A Start carried on after its install has run, whatever it answered.
+      setResumingStart(false);
     }
   }
 
-  async function applyRuntimeUpdate() {
-    setBusy(true);
-    setFailure(null);
-    setSteps([]);
-    try {
-      const result = await invoke("apply_runtime_update", {
-        root: root.trim(),
-        // Intelligence's addresses are the ones this installation last started with; the native
-        // side reads them from its settings.
-        model,
-        harness,
-        backupAcknowledged: true,
-      });
-      setRunning(true);
-      setRecoveryFailure(null);
-      return result;
-    } catch (error) {
-      recoverFromStart(error);
-      throw error;
-    } finally {
-      setBusy(false);
-    }
-  }
   async function applyShellUpdate(version: string) {
     setBusy(true);
     setFailure(null);
@@ -586,23 +595,8 @@ function Setup() {
       setBusy(false);
     }
   }
-  const runtimeUpdates = (
-    <RuntimeUpdates
-      key={root}
-      root={root}
-      onApply={applyRuntimeUpdate}
-      onShellApply={applyShellUpdate}
-    />
-  );
-
-  const runtimeRecovery = (
-    <RuntimeUpdates
-      key={root}
-      root={root}
-      onApply={applyRuntimeUpdate}
-      recoveryOnly
-    />
-  );
+  // OpenBot's own updates. The installation follows the app: Start upgrades it to the app's release.
+  const appUpdates = <ShellUpdates key={root} onApply={applyShellUpdate} />;
 
   /** The leftovers go first, then Start carries on: starting fresh is one choice, not two. */
   async function startFresh(volumes: string[], containers: string[]) {
@@ -628,23 +622,24 @@ function Setup() {
     local.retry();
   }
 
-  function modelCanStart() {
-    if (!model) return false;
-    if (!model.saved) return true;
-    if (model.provider === "google" || model.provider === "xai") {
-      return model.login === "oauth" && Boolean(model.model?.trim());
+  /** The model chosen can start OpenBot: a saved one must be complete enough to use. */
+  function modelCanStart(choice = model) {
+    if (!choice) return false;
+    if (!choice.saved) return true;
+    if (choice.provider === "google" || choice.provider === "xai") {
+      return choice.login === "oauth" && Boolean(choice.model?.trim());
     }
-    if (model.provider === "openai-compatible") {
+    if (choice.provider === "openai-compatible") {
       return (
-        model.login === "endpoint" &&
-        isHttpEndpointUrl(model.baseUrl ?? "") &&
-        Boolean(model.model?.trim())
+        choice.login === "endpoint" &&
+        isHttpEndpointUrl(choice.baseUrl ?? "") &&
+        Boolean(choice.model?.trim())
       );
     }
-    if (model.provider !== "openai" && model.provider !== "anthropic") {
+    if (choice.provider !== "openai" && choice.provider !== "anthropic") {
       return false;
     }
-    return model.login === "plan" || model.login === "api-key";
+    return choice.login === "plan" || choice.login === "api-key";
   }
 
   /** True when OpenBot stopped, even if the local Intelligence stack it started did not. */
@@ -697,21 +692,23 @@ function Setup() {
 
   /*
    * Starts local Intelligence without a click: a recorded stack on a first run that was not
-   * interrupted, or a connected one on relaunch with auto-start on. Never after Stop OpenBot.
+   * interrupted, or a connected one on relaunch with auto-start on. Never after Stop OpenBot. And a
+   * Start that waited for the install it asked for, which is carrying on, not starting anew.
    */
   const localAuto =
     !checkingResume &&
     !running &&
-    !stoppedByChoice.current &&
     step === "connect" &&
     modelCanStart() &&
-    (returningToInstallation
-      ? !refreshIntelligence && localAutoStart
-      : !interruptedAtLaunch.current);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: when it turns on.
+    (resumingStart ||
+      (!stoppedByChoice.current &&
+        (returningToInstallation
+          ? !refreshIntelligence && localAutoStart
+          : !interruptedAtLaunch.current)));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: when it turns on, or a Start resumes.
   useEffect(() => {
     if (localAuto) local.start();
-  }, [localAuto]);
+  }, [localAuto, resumingStart]);
 
   // Quit outranks every screen: the app is closing, whatever was on it.
   const quitting = useQuitStatus(false);
@@ -772,7 +769,6 @@ function Setup() {
           }}
           failure={displayedFailure && <Failure problem={displayedFailure} />}
         />
-        {runtimeRecovery}
       </main>
     );
   }
@@ -790,7 +786,10 @@ function Setup() {
               ? "OpenBot’s local software is ready. Next, connect your AI."
               : INSTALL_BLURB}
           </p>
-          <SetupProgress steps={plainInstallSteps(steps, busy)} />
+          <SetupProgress
+            steps={plainInstallSteps(steps, busy)}
+            showElapsed={false}
+          />
           {/* Intelligence sets itself up alongside, once the install has Docker answering. */}
           <LocalStatus sequence={local} />
           {displayedFailure && <Failure problem={displayedFailure} />}
@@ -827,7 +826,6 @@ function Setup() {
             </div>
           )}
         </div>
-        {runtimeRecovery}
       </main>
     );
   }
@@ -905,7 +903,6 @@ function Setup() {
             setRecoveryFailure(null);
           }}
         />
-        {runtimeRecovery}
       </main>
     );
   }
@@ -930,7 +927,7 @@ function Setup() {
           <h1>{localStarting ? "Starting OpenBot" : "OpenBot is stopped"}</h1>
           <p className="lede">
             {localStarting
-              ? "Starting Intelligence and OpenBot on this computer."
+              ? "Starting the back end first, then the rest of OpenBot."
               : "Your installation and saved connections are ready to reopen."}
           </p>
           <LocalIntelligence sequence={local} offerStart />
@@ -959,7 +956,7 @@ function Setup() {
                   </button>
                 )}
               </div>
-              {runtimeUpdates}
+              {appUpdates}
               <details>
                 <summary>Installation options</summary>
                 <button
@@ -1036,7 +1033,7 @@ function Setup() {
   return (
     <main>
       <div className="sheet connection-sheet">
-        {returningToInstallation && runtimeUpdates}
+        {returningToInstallation && appUpdates}
         {/* A failure outranks `running`. The supervisor gives up on a process and sends the window
           back here, and a heading that still says everything is running while the box underneath
           names the process that stopped is a screen arguing with itself. */}
@@ -1047,7 +1044,7 @@ function Setup() {
             the menu bar.
           </p>
         )}
-        {/* Start went back to the release this installation had. Said before handing over. */}
+        {/* Start went back to the version this installation had. Said before handing over. */}
         {!displayedFailure && releaseNotice && (
           <InlineFailure problem={releaseNotice} />
         )}

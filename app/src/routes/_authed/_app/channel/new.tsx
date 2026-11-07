@@ -1,6 +1,6 @@
 import type { Message } from "@ag-ui/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
 import { useState } from "react";
 import { NewBotSheet } from "@/components/agents/new-bot-sheet";
 import AgentOrb from "@/components/agents/orb/agent-orb";
@@ -12,6 +12,8 @@ import {
   toFieldChange,
 } from "@/components/channels/compose-state";
 import { ModelPicker } from "@/components/channels/composer/model-picker";
+import type { ComposerDraft } from "@/components/channels/composer";
+import { StarterSuggestions } from "@/components/starter-tour/starter-suggestions";
 import { ConversationView } from "@/components/channels/conversation-view";
 import { seedMessage } from "@/components/channels/transcript-messages";
 import { SidebarToggle } from "@/components/layout/sidebar-toggle";
@@ -60,7 +62,46 @@ export const Route = createFileRoute("/_authed/_app/channel/new")({
   component: RouteComponent,
 });
 
+/**
+ * Which new conversation this is. Every arrival here that this page did not make itself is a fresh
+ * one: the + button, a Bot's profile link, Back to an earlier draft. The page's own navigations (a
+ * Bot picked or removed, a Bot made from the picker) carry the id forward in history state, so they
+ * keep the draft they belong to.
+ *
+ * WHY NOT JUST THE URL: the picked Bots and the typed message live in this page, not the URL, and a
+ * second visit to the same route does not remount it. Pressing + while a Bot was already picked
+ * dropped `?agent=` from the URL but left the Bot in To: and the message in the box, so the screen
+ * and the URL disagreed and a reload changed who the message would go to.
+ */
+function compositionOf(state: {
+  newConversation?: string;
+  __TSR_key?: string;
+}): string | undefined {
+  return state.newConversation ?? state.__TSR_key;
+}
+
+declare module "@tanstack/react-router" {
+  interface HistoryState {
+    /** Set by `/channel/new` on its own navigations: which new conversation they belong to. */
+    newConversation?: string;
+  }
+}
+
+/** History state marking a navigation as this page's own. */
+function ownedBy(composition: string) {
+  return { newConversation: composition };
+}
+
 function RouteComponent() {
+  const composition = useLocation({
+    select: (location) => compositionOf(location.state),
+  });
+  return (
+    <NewConversation composition={composition ?? ""} key={composition ?? ""} />
+  );
+}
+
+function NewConversation({ composition }: { composition: string }) {
   const { agent } = Route.useSearch();
   const queryClient = useQueryClient();
   const [creatingBot, setCreatingBot] = useState(false);
@@ -137,6 +178,53 @@ function RouteComponent() {
     group ? "" : (recipients[0]?.id ?? ""),
   );
 
+  const submit = async (draft: ComposerDraft) => {
+    const recipient = recipients[0];
+    if (!recipient || !canSend(recipients, draft.text)) return;
+    if (group) {
+      setError(null);
+      try {
+        await startGroup(
+          recipients.map((entry) => entry.id),
+          draft.text,
+        );
+      } catch (caught) {
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : "Couldn't start the group. Try again.",
+        );
+        throw caught;
+      }
+      return;
+    }
+
+    setError(null);
+    setSent(seedMessage(draft.text, newId()));
+
+    try {
+      // Recorded, then started: a coworker picked here is as much a choice as an `@` on the
+      // home screen, and the trail has to say so for both.
+      // With its `/` skills, which the conversation puts in front of it as it does for every
+      // later message; handing over only the text sent the chip and dropped the skill.
+      await startChosen(
+        recipient.id,
+        draft.text,
+        skillInstructionsFor(draft.commandIds, skillCommands),
+        draftModel.requested,
+      );
+    } catch (caught) {
+      // Preserve the unsent draft when channel creation fails.
+      setSent(null);
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Couldn't start the conversation. Try again.",
+      );
+      throw caught;
+    }
+  };
+
   if (profiles === undefined && !rosterError) return null;
 
   return (
@@ -167,6 +255,7 @@ function RouteComponent() {
             void navigate({
               replace: true,
               search: kept[0] ? { agent: kept[0].id } : {},
+              state: ownedBy(composition),
             });
           }}
           value={selected}
@@ -247,7 +336,11 @@ function RouteComponent() {
                   : [...existing, profile];
               });
               if (selected.length === 0)
-                void navigate({ replace: true, search: { agent: agentId } });
+                void navigate({
+                  replace: true,
+                  search: { agent: agentId },
+                  state: ownedBy(composition),
+                });
             })
             .catch(() => {
               setError(
@@ -273,6 +366,23 @@ function RouteComponent() {
           Boolean(loadError) || waitingForUrlAgent || recipients.length === 0
         }
         messages={sent ? [sent] : []}
+        starterSuggestions={
+          !group && !sent ? (
+            <StarterSuggestions
+              agentId={recipients[0]?.id}
+              disabled={pending || Boolean(loadError) || waitingForUrlAgent}
+              onSelect={(text) =>
+                submit({
+                  text,
+                  commandIds: [],
+                  attachments: [],
+                  agentId: recipients[0]?.id ?? null,
+                  isEmpty: false,
+                })
+              }
+            />
+          ) : undefined
+        }
         notice={
           loadError || error ? (
             <p className="pb-2 text-sm text-destructive" role="alert">
@@ -280,52 +390,7 @@ function RouteComponent() {
             </p>
           ) : null
         }
-        onSubmit={async (draft) => {
-          const recipient = recipients[0];
-          if (!recipient || !canSend(recipients, draft.text)) return;
-          if (group) {
-            setError(null);
-            try {
-              await startGroup(
-                recipients.map((entry) => entry.id),
-                draft.text,
-              );
-            } catch (caught) {
-              setError(
-                caught instanceof Error
-                  ? caught.message
-                  : "Couldn't start the group. Try again.",
-              );
-              throw caught;
-            }
-            return;
-          }
-
-          setError(null);
-          setSent(seedMessage(draft.text, newId()));
-
-          try {
-            // Recorded, then started: a coworker picked here is as much a choice as an `@` on the
-            // home screen, and the trail has to say so for both.
-            // With its `/` skills, which the conversation puts in front of it as it does for every
-            // later message; handing over only the text sent the chip and dropped the skill.
-            await startChosen(
-              recipient.id,
-              draft.text,
-              skillInstructionsFor(draft.commandIds, skillCommands),
-              draftModel.requested,
-            );
-          } catch (caught) {
-            // Preserve the unsent draft when channel creation fails.
-            setSent(null);
-            setError(
-              caught instanceof Error
-                ? caught.message
-                : "Couldn't start the conversation. Try again.",
-            );
-            throw caught;
-          }
-        }}
+        onSubmit={submit}
         pending={pending}
       />
     </div>

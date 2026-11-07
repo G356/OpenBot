@@ -627,6 +627,18 @@ export function createApp(
       );
     }
     if (!auth) {
+      /*
+       * One person and no sign-in (OpenBot Desktop): there is no session for Sign out to end, so
+       * ending it has already happened. The app no longer offers Sign out here; a page loaded
+       * before that change still could, and a 503 left the person staring at "No identity provider
+       * is configured." for a button that cannot fail.
+       */
+      if (
+        config.singleUser &&
+        context.req.method === "POST" &&
+        new URL(context.req.url).pathname === "/api/auth/sign-out"
+      )
+        return context.json({ success: true });
       return context.json(
         { error: "No identity provider is configured." },
         503,
@@ -1568,9 +1580,11 @@ export function createApp(
               canHandOn: (agentId) => pluginStore.agentCanHandOn(agentId),
             }
           : undefined,
-        // Whether "built-in" is a kind of coworker this deployment can actually make: the create
-        // path falls back to the managed Bot's endpoint, so without one it can only refuse.
-        config.managedAgent?.endpoint !== undefined,
+        // Whether a Bot made with no address can run here. Always: with a managed Bot it runs there,
+        // and without one `create` makes a `built_in` Bot that runs in this server on the person's
+        // instructions, as the personal edition's Personal Assistant does. Answering "is there a
+        // managed Bot" told OpenBot Desktop, which has none, that nobody could make a Bot at all.
+        true,
         // The managed Bot's address, so a coworker created without an endpoint — which creation
         // stores as running at this address — can be told apart from one a person hosts.
         config.managedAgent?.endpoint?.toString(),
@@ -1588,6 +1602,10 @@ export function createApp(
           : undefined,
         // Whether a Bot can have a computer of its own here: only where the provider makes computers.
         { available: deploymentCanIsolate(config.computer) },
+        // An agent on the person's own loopback, dialled from this server's container.
+        config.thisMachineHost
+          ? { thisMachineHost: config.thisMachineHost }
+          : undefined,
       ),
     );
     // Choosing a coworker for an untagged message needs the same permission-filtered roster the
@@ -1601,6 +1619,12 @@ export function createApp(
             store: agentProfileStore,
             router: intentRouter,
             auditStore,
+            skillsFor: pluginStore
+              ? async (agentId) =>
+                  (await pluginStore.listForAgent(agentId)).skills.map(
+                    (skill) => skill.slug,
+                  )
+              : undefined,
             /*
              * Which vendors each coworker holds tools for, so the router weighs what a coworker can
              * reach and not only what somebody wrote it was for. Only when there is a plugin store to
@@ -1630,7 +1654,13 @@ export function createApp(
   if (channelStore) {
     app.route(
       "/api/channels",
-      createChannelRoutes(channelStore, requireUser, channelEvents, auditStore),
+      createChannelRoutes(
+        channelStore,
+        requireUser,
+        channelEvents,
+        auditStore,
+        userPreferences,
+      ),
     );
   }
 

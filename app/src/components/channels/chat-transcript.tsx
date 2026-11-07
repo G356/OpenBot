@@ -70,7 +70,11 @@ import type { CardPlace } from "@/lib/copilot/carry-on";
 import { foreignCodingCall } from "@/lib/copilot/coding-calls";
 import { ToolPlaceContext } from "@/lib/copilot/tool-place";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
-import { markdownComponents, markdownPlugins } from "@/lib/markdown";
+import {
+  markdownComponents,
+  markdownPlugins,
+  replyRemarkPlugins,
+} from "@/lib/markdown";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import {
   asText,
@@ -78,6 +82,11 @@ import {
   REFUSAL_MARKER,
   toolResultFailed,
 } from "@/lib/plugins/tool-result";
+import {
+  RESEARCH_RESULTS_LABELS,
+  readResearchSources,
+  researchRoleOfCall,
+} from "@/lib/plugins/research-results";
 import { useResultVisibility } from "@/lib/product-telemetry";
 import { readTeamBotConsent } from "@/lib/team-bots";
 import { cn } from "@/lib/utils";
@@ -95,6 +104,7 @@ import type { QueuedMessage } from "./composer";
 import { FollowScroll, RESUME_PX, useFollowIntent } from "./follow-intent";
 import { LateRenderersContext, LateRenderersWatch } from "./late-renderers";
 import { usePacedReveal } from "./paced-reveal";
+import { ResearchResults } from "./research-results";
 import { TeamBotConsentCard } from "./team-bot-consent";
 import {
   dropRepeatedAppCards,
@@ -121,8 +131,11 @@ type ChatTranscriptProps = {
   /** Server-owned thread identity, used only to correlate rendered result messages. */
   threadId?: string;
   busy?: boolean;
-  /** Comma-separated `/` command names, used to tell a skill chip from a leading slash. */
-  commandNames?: string;
+  /**
+   * The `/` commands, as JSON from each command to its name: tells a skill chip from a leading
+   * slash, and names the skill on its badge. See `skillLabels`.
+   */
+  commandLabels?: string;
   /**
    * Drawn above the first message, as the first thing in the scroll content, so it scrolls away
    * with the conversation. Only once the earliest page is drawn: see where it is rendered.
@@ -158,27 +171,55 @@ type ChatTranscriptProps = {
 const EMPTY_QUEUE: readonly QueuedMessage[] = [];
 
 /**
+ * The `/` commands handed to the transcript, from each command to the skill's name.
+ *
+ * A string of JSON rather than an object, because message rows are memoised on primitives; see
+ * where `ChatTranscript` is drawn. Built by {@link skillLabels}, read back by {@link splitSkillChip}.
+ */
+export function skillLabels(
+  commands: readonly { id: string; name: string }[],
+): string {
+  return JSON.stringify(
+    Object.fromEntries(commands.map((command) => [command.id, command.name])),
+  );
+}
+
+function readLabels(labels: string): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(labels || "{}");
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, string>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Split a person's message into the skill they invoked and the rest of what they typed.
  *
  * ONLY A KNOWN COMMAND COUNTS. "/etc/hosts is broken" is a sentence, not a skill, and drawing a chip
- * around it would invent a thing that never happened. The names come from the same list the `/` menu
- * was built from, so this stays true as skills are granted and revoked.
+ * around it would invent a thing that never happened. The commands come from the same list the `/`
+ * menu was built from, so this stays true as skills are granted and revoked.
+ *
+ * The message carries the command (`/standup`), which never changes; the badge shows the skill's
+ * name, as the menu and the composer's chip did.
  *
  * The trigger only opens at the start of a line, so the chip is the first token or there is none.
  */
 function splitSkillChip(
   text: string,
-  commandNames: string,
+  commandLabels: string,
 ): { chip: string; rest: string } | null {
   const match = /^\/([a-z0-9][a-z0-9-]*)(\s|$)/.exec(text);
-  if (!match) {
+  if (!match?.[1]) {
     return null;
   }
-  const known = commandNames.split(",").filter(Boolean);
-  if (!known.includes(match[1])) {
+  const name = readLabels(commandLabels)[match[1]];
+  if (!name) {
     return null;
   }
-  return { chip: match[1], rest: text.slice(match[0].length) };
+  return { chip: name, rest: text.slice(match[0].length) };
 }
 
 /**
@@ -691,7 +732,7 @@ function ResponsibilityFiring({
       <IconClock aria-hidden className="size-4 shrink-0 translate-y-0.5" />
       <div className="min-w-0">
         <p>
-          <span className="font-medium">Responsibility ran.</span> Trigger:{" "}
+          <span className="font-medium">Worked on a goal.</span> Trigger:{" "}
           {describeTrigger(turn.trigger)}
         </p>
         <p className="whitespace-pre-wrap">{turn.instruction}</p>
@@ -724,7 +765,7 @@ function ResponsibilityFiring({
  * It is also what keeps the entrance honest — no remount means no replay of the fade.
  */
 const TranscriptMessage = memo(function TranscriptMessage({
-  commandNames = "",
+  commandLabels = "",
   role,
   streaming = false,
   settled = true,
@@ -732,7 +773,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
   threadId,
   messageId,
 }: {
-  commandNames?: string;
+  commandLabels?: string;
   role: "user" | "assistant";
   threadId?: string;
   messageId: string;
@@ -774,7 +815,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
   // Slack/Teams turns carry a model-facing participant line; show a marker instead of the line.
   const origin = isUser ? splitChatOrigin(text) : null;
   const said = origin ? origin.text : text;
-  const invoked = isUser ? splitSkillChip(said, commandNames) : null;
+  const invoked = isUser ? splitSkillChip(said, commandLabels) : null;
   /*
    * Another Bot's answer, asked for by this one: drawn under that Bot's face and name, as a group
    * conversation draws each Bot, so it reads as the Bot that was asked speaking rather than as this
@@ -826,8 +867,9 @@ const TranscriptMessage = memo(function TranscriptMessage({
                        * `align-middle` rather than a block: this sits mid-sentence, and a badge that
                        * breaks the line it is in reads as a separate message.
                        */}
-                      <span className="mr-1 inline-flex items-center gap-1 rounded bg-foreground/10 px-1.5 py-0.5 align-middle font-mono text-foreground/80 text-xs">
-                        <IconBox className="size-3 shrink-0" />/{invoked.chip}
+                      <span className="mr-1 inline-flex items-center gap-1 rounded bg-foreground/10 px-1.5 py-0.5 align-middle text-foreground/80 text-xs">
+                        <IconBox className="size-3 shrink-0" />
+                        {invoked.chip}
                       </span>
                       {invoked.rest}
                     </>
@@ -850,6 +892,7 @@ const TranscriptMessage = memo(function TranscriptMessage({
                     components={markdownComponents}
                     mode={mode}
                     plugins={markdownPlugins}
+                    remarkPlugins={replyRemarkPlugins}
                   >
                     {revealed}
                   </Streamdown>
@@ -1677,6 +1720,27 @@ export function ServerToolLine({
    * happened; the Bot's own reply says what it found.
    */
   const shown = name === SHOW_APP_ACCESS_TOOL ? undefined : body;
+  /*
+   * A web search or a page read opens to the pages it found, not to the provider's JSON. The list
+   * bounds itself (a few results, each cut to a few lines), so the line does not scroll around it.
+   */
+  const role = researchRoleOfCall(name);
+  const sources =
+    role && shown && !refused && !failed ? readResearchSources(shown) : null;
+  if (role && sources)
+    return (
+      <ToolLine
+        {...(detail ? { detail } : {})}
+        bare
+        label={label}
+        running={running}
+      >
+        <ResearchResults
+          label={RESEARCH_RESULTS_LABELS[role]}
+          sources={sources}
+        />
+      </ToolLine>
+    );
   return (
     <ToolLine
       {...(detail ? { detail } : {})}
@@ -1896,7 +1960,7 @@ function TranscriptRenderersWatch({
 export function ChatTranscript({
   threadId,
   busy = false,
-  commandNames = "",
+  commandLabels = "",
   intro,
   messages,
   onRemoveQueued,
@@ -2262,7 +2326,7 @@ export function ChatTranscript({
           threadId={threadId}
           messageId={item.id}
           settled={!busy || index < turnStart}
-          commandNames={commandNames}
+          commandLabels={commandLabels}
           role={item.role}
           streaming={
             busy && item.role === "assistant" && index === items.length - 1

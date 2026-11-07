@@ -29,6 +29,7 @@ import {
 } from "@/components/channels/transcript-messages";
 import { VoiceCallWidget } from "@/components/channels/voice-call-widget";
 import { HandoffResumeNotice } from "@/components/computer/handoff-resume-notice";
+import { StarterSuggestions } from "@/components/starter-tour/starter-suggestions";
 import { agentListQueryOptions } from "@/lib/agents/queries";
 import { answerPersonQuestionMutationOptions } from "@/lib/approvals";
 import { attachmentUrl } from "@/lib/channels/attachments";
@@ -56,8 +57,11 @@ import { ConversationProvider } from "@/lib/copilot/conversation";
 import { afterMs, joinWithin } from "@/lib/copilot/join-thread";
 import { repairUnansweredToolCalls } from "@/lib/copilot/repair-history";
 import { releaseServerOwnedInterrupts } from "@/lib/copilot/server-owned-interrupts";
-import { stoppedReason } from "@/lib/copilot/stopped-turn";
-import { readThreadMessages } from "@/lib/copilot/thread-messages";
+import { followLastRun, stoppedReason } from "@/lib/copilot/stopped-turn";
+import {
+  readThreadMessages,
+  withCurrentA2uiVersions,
+} from "@/lib/copilot/thread-messages";
 import { modelCatalogueQueryOptions } from "@/lib/models/queries";
 import { useConversationModel } from "@/lib/models/run-model";
 import {
@@ -451,6 +455,14 @@ export function ChannelChat({
     "ready" | "unavailable"
   >("ready");
   const [historyReadFailed, setHistoryReadFailed] = useState(false);
+  /**
+   * Why the last run ended without an answer, drawn under the transcript.
+   *
+   * Set by a turn of this mount that fails, and on joining the thread when the history it replays
+   * ends in a failed run (`followLastRun`), so the failure is still there after a reload. Cleared by
+   * the next turn.
+   */
+  const [runError, setRunError] = useState<string | null>(null);
   // Mount reads and Bot refreshes share one ordering: only the newest read owns the notice.
   const historyReadVersion = useRef(0);
   useEffect(() => {
@@ -462,11 +474,14 @@ export function ChannelChat({
     if (!isReady) return;
     let current = true;
     const version = ++historyReadVersion.current;
+    // Before the connect: it is handed the subscribers the agent has when it starts.
+    const lastRun = followLastRun(agent);
 
     void (async () => {
+      let joined: "connected" | "deadline" = "deadline";
       try {
         // Bounded, and finished when it returns; `join-thread.ts` has why that matters.
-        await joinWithin({
+        joined = await joinWithin({
           // A turn too: restoring a thread can run the calls it left unanswered.
           connect: whileObserved(agent, () =>
             copilotkit.connectAgent({ agent }),
@@ -480,6 +495,17 @@ export function ChannelChat({
          * typed afterwards waits on that gate, so a throw here would silence the conversation
          * rather than degrade it. History is restored below either way.
          */
+      } finally {
+        lastRun.stop();
+      }
+      /*
+       * The last run failed, so say so again, as the turn did when it failed. Only from a replay
+       * that finished: one ended at the deadline may stop short of the run that answered. Not over
+       * a turn already waiting to go, which clears it the moment it starts.
+       */
+      const failed = joined === "connected" ? lastRun.failure() : null;
+      if (failed !== null && current && turnsRef.current === 0) {
+        setRunError((shown) => shown ?? failed);
       }
 
       try {
@@ -491,7 +517,12 @@ export function ChannelChat({
         if (isCurrent) {
           // The gateway snapshot can lag the store. Keep its valid local rows even when the
           // corresponding stored row is unreadable, while restoring other readable additions.
-          const messages = mergeStoredMessages(agent.messages, stored.messages);
+          // The snapshot's interfaces are read in the A2UI version CopilotKit reads now, as the
+          // store's are (thread-messages.ts), or the local copy kept here would not draw.
+          const messages = mergeStoredMessages(
+            withCurrentA2uiVersions(agent.messages),
+            stored.messages,
+          );
           if (messages !== agent.messages) agent.setMessages(messages);
         }
         /*
@@ -597,7 +628,7 @@ export function ChannelChat({
           setHistoryReadFailed(false);
           const current = agentRef.current;
           const messages = mergeStoredMessages(
-            current.messages,
+            withCurrentA2uiVersions(current.messages),
             stored.messages,
           );
           if (messages === current.messages) continue;
@@ -680,8 +711,6 @@ export function ChannelChat({
     unreadable,
   });
 
-  // Run failures arrive as events and are reported only for turns started in this mount.
-  const [runError, setRunError] = useState<string | null>(null);
   const awaitingReply = useRef(false);
   /**
    * WHY THIS TURN ENDED WITHOUT AN ANSWER, KEPT WHERE `deliver` CAN STILL SEE IT — because the one
@@ -1191,6 +1220,28 @@ export function ChannelChat({
             }
             agents={toAgentOptions(agentProfiles, channel.agentIds)}
             channelId={channel.id}
+            starterSuggestions={
+              channel.agentIds.length === 1 ? (
+                <StarterSuggestions
+                  agentId={runtimeAgentId}
+                  channelId={channel.id}
+                  disabled={
+                    !channel.active ||
+                    historyLoading ||
+                    agent.isRunning ||
+                    turnsInFlight > 0 ||
+                    Boolean(question) ||
+                    call.active ||
+                    runModel.saving
+                  }
+                  onSelect={async (text) => {
+                    await runModel.beforeSend();
+                    // The transcript already reports a failed turn through runError.
+                    await sayRef.current(text).catch(() => undefined);
+                  }}
+                />
+              ) : undefined
+            }
             intro={
               /* From the roster this screen already reads; nothing while it loads. */
               botProfile ? <ConversationIntro agent={botProfile} /> : undefined

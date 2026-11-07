@@ -37,6 +37,11 @@ import { enterText, FieldValueError } from "./enter-text";
 import { identity } from "./identity";
 import { createInputQueue, type InputQueue } from "./input-queue";
 import {
+  LOOPBACK_RELAYS_ENV,
+  parseLoopbackRelays,
+  startLoopbackRelays,
+} from "./loopback-relay";
+import {
   assertPageAccess,
   navigateWebPage,
   type PagePurpose,
@@ -348,6 +353,12 @@ const terminalSockets = createTerminalSockets<StreamData & TerminalSocketData>({
 // Only the running computer points its shell at it: a test that imports this module shares its
 // process with every later test.
 await startEgressFilter({ forShell: import.meta.main });
+// The deployment's loopback addresses, where a browser here is handed one (OpenBot Desktop). Before any browser exists,
+// so a Recorder never connects to an address that is not there yet. See loopback-relay.ts.
+if (import.meta.main)
+  await startLoopbackRelays(
+    parseLoopbackRelays(process.env[LOOPBACK_RELAYS_ENV]),
+  );
 const profiles = createProfiles(
   process.env.PROFILES_DIR?.trim() || "/profiles",
   async (botId) => {
@@ -1601,7 +1612,9 @@ serve<StreamData & TerminalSocketData>({
         const startedAt = Date.now();
         try {
           const target = await currentPage(botId, "navigate");
-          session.control.assertBotMayAct(true);
+          // Opening an address needs no fresh look after a handback (`mutatesBrowser`). Following a
+          // link off the page does: it acts on that page, as a click on the link would.
+          session.control.assertBotMayAct(citation !== undefined);
           // A followed link is checked against the live page as a click on it would be: the snapshot
           // it came from must still be current, the ref must still name an element, and that element
           // must still go where the server was told it goes. Otherwise it is stale, and nothing opens.
@@ -1638,6 +1651,8 @@ serve<StreamData & TerminalSocketData>({
           // Bumping the generation makes an action carrying one fail with "take a new snapshot" rather
           // than fall through to a selector that matches nothing and read as a missing element.
           session.snapshotId += 1;
+          // And the page a person handed back is gone, so the Bot has nothing of theirs left to look at.
+          session.control.pageReplaced();
           const extract = await readablePageText(target);
           return json({
             url: target.url(),

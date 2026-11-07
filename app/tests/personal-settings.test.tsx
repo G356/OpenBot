@@ -15,10 +15,17 @@ import {
   isRedirect,
   RouterProvider,
 } from "@tanstack/react-router";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, within } from "@testing-library/react";
+import { ComputersPage } from "@/components/manage/computers-page";
 import { PluginToolPage } from "@/components/manage/plugin-tool-page";
 import { SkillsPage } from "@/components/manage/skills-page";
 import { settingsSidebarItems } from "@/components/settings/settings-sidebar";
+import { type AgentProfile, agentKeys } from "@/lib/agents/queries";
+import {
+  type HostAccessStatus,
+  hostAccessKeys,
+} from "@/lib/computers/host-access";
+import { type ComputerFleet, computerKeys } from "@/lib/computers/queries";
 import {
   type DeploymentCapabilities,
   deploymentKeys,
@@ -56,7 +63,7 @@ function clientFor(edition: "team" | "personal" | undefined) {
 const PERSONAL_ENTRIES = [
   ["Saved logins", "/settings/passwords"],
   ["Keys", "/settings/credentials"],
-  ["Skills for every Bot", "/settings/skills"],
+  ["Skills", "/settings/skills"],
   ["Computer", "/settings/computer"],
   ["Activity", "/settings/activity"],
 ] as const;
@@ -156,7 +163,7 @@ describe("the personal pages under Settings", () => {
     }
   });
 
-  test("name the skills page apart from a person's own skills", async () => {
+  test("call the skills page Skills, with nothing about every Bot", async () => {
     const client = clientFor("personal");
     client.setQueryData(["plugins", "page"], {
       catalogue: [],
@@ -176,9 +183,8 @@ describe("the personal pages under Settings", () => {
         <RouterProvider router={router as never} />
       </QueryClientProvider>,
     );
-    expect(
-      await view.findByRole("heading", { name: "Skills for every Bot" }),
-    ).toBeTruthy();
+    expect(await view.findByRole("heading", { name: "Skills" })).toBeTruthy();
+    expect(view.container.textContent).not.toContain("every Bot");
   });
 
   test("link to each other under Settings, not Admin", async () => {
@@ -209,5 +215,97 @@ describe("the personal pages under Settings", () => {
     // The page's back button: an anchor drawn as a button.
     const back = await view.findByRole("button", { name: /Plugin/ });
     expect(back.getAttribute("href")).toBe("/connections/notion");
+  });
+});
+
+/*
+ * The Computer page in the personal edition is one person's one computer. It used to say how to give
+ * each person a computer of their own (an environment variable only a team deployment sets) and list
+ * "Computers in this deployment" by whose seat each was. The person's own controls stay.
+ */
+describe("the Computer page", () => {
+  /** What the one shared computer answers once the Personal Assistant has opened a page. */
+  const fleet: ComputerFleet = {
+    isolation: "shared",
+    computers: [
+      {
+        computer: "person:dev-local-user",
+        kind: "person",
+        personId: "dev-local-user",
+        person: { name: "dev@openbot.local", email: "dev@openbot.local" },
+        botId: "personal-assistant",
+        running: true,
+        startedAt: "2026-11-07T04:21:42.051Z",
+        egress: "network policy filter",
+      },
+    ],
+  };
+  const hostAccess: HostAccessStatus = {
+    connected: false,
+    grants: [],
+    pending: [],
+  };
+  const assistant = {
+    id: "personal-assistant",
+    name: "Personal Assistant",
+  } as AgentProfile;
+
+  async function renderPage(edition: "team" | "personal") {
+    const client = clientFor(edition);
+    client.setDefaultOptions({
+      queries: { retry: false, staleTime: Infinity },
+    });
+    client.setQueryData(computerKeys.fleet(), fleet);
+    client.setQueryData(hostAccessKeys.status(), hostAccess);
+    client.setQueryData(agentKeys.list(false), [assistant]);
+    const router = createRouter({
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+      routeTree: createRootRoute({ component: () => <ComputersPage /> }),
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router as never} />
+      </QueryClientProvider>,
+    );
+    await view.findByRole("heading", { name: /^Computers?$/ });
+    return view;
+  }
+
+  test("in the personal edition has nothing only a team deployment can act on", async () => {
+    const view = await renderPage("personal");
+    const text = view.container.textContent ?? "";
+    expect(text).not.toContain("COMPUTER_SUPERVISOR_URL");
+    expect(text).not.toContain("Computers in this deployment");
+    expect(text).not.toContain("isolated Bot");
+    expect(text).not.toContain("dev@openbot.local");
+    expect(text).not.toContain("This person's profile");
+    expect(text).not.toContain("network policy filter");
+    expect(view.getByRole("heading", { name: "Computer" })).toBeTruthy();
+  });
+
+  test("in the personal edition keeps folders and each Bot's browser, with Stop and Reset", async () => {
+    const view = await renderPage("personal");
+    expect(
+      view.getByRole("heading", { name: "Folders on this computer" }),
+    ).toBeTruthy();
+    const browsers = view.getByRole("heading", { name: "Your Bots' browsers" })
+      .parentElement?.parentElement as HTMLElement;
+    expect(within(browsers).getByText("Personal Assistant")).toBeTruthy();
+    expect(
+      within(browsers).getByRole("button", { name: "Stop browser" }),
+    ).toBeTruthy();
+    expect(
+      within(browsers).getByRole("button", { name: "Reset" }),
+    ).toBeTruthy();
+  });
+
+  test("in the team edition still tells an admin how to give each person a computer", async () => {
+    const view = await renderPage("team");
+    const text = view.container.textContent ?? "";
+    expect(view.getByRole("heading", { name: "Computers" })).toBeTruthy();
+    expect(text).toContain("COMPUTER_SUPERVISOR_URL");
+    expect(text).toContain("Computers in this deployment");
+    expect(text).toContain("dev@openbot.local · Personal Assistant");
+    expect(text).toContain("Leaves through network policy filter");
   });
 });

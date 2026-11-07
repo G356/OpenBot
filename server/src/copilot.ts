@@ -24,6 +24,7 @@ import {
   requiresResponsesApi,
 } from "@openbot/shared/model-providers";
 import { MODEL_TOOL_LIMIT } from "@openbot/shared/model-tool-limit";
+import { runTimeZone } from "@openbot/shared/person-time-zone";
 import {
   BuiltInAgentWithSaneHistory,
   CloningRemoteAgent,
@@ -50,6 +51,7 @@ import {
   type ActorAgentResolver,
   CoworkerUnavailableError,
 } from "./agents/agent-resolver";
+import { attributeBotAnswers } from "./agents/bot-answers";
 import {
   PlanModel,
   type PlanModelConfig,
@@ -214,6 +216,28 @@ function claimsServerInstructionId(message: Message): boolean {
 }
 
 /**
+ * How a Bot knows a request is for it.
+ *
+ * People address a Bot as "Knowledge" or "the Knowledge Bot", and the router sends "ask the
+ * Knowledge Bot for one sentence on Helm" to Knowledge, rightly. A Bot that was never told its own
+ * name read that as a request to reach somebody else: Knowledge went looking for a way to ask the
+ * Knowledge Bot, found none, and told the person it could not. So every Bot is told the names it
+ * answers to, and that a request to ask one of them is a request to answer.
+ */
+export function selfAddressGuidance(name: string): string {
+  const named = /\bbot$/i.test(name.trim()) ? `the ${name}` : `the ${name} Bot`;
+  return `People call you "${name}" or "${named}". A request to ask, message or hand work to ${name} is a request to you, so answer it yourself.`;
+}
+
+/**
+ * The first thing a built-in Bot reads: its name. A Bot's prompt is whatever somebody wrote about
+ * its job, and the package's own Knowledge prompt never says what it is called.
+ */
+function identityGuidance(name: string): string {
+  return `You are ${name}, a Bot in OpenBot. ${selfAddressGuidance(name)}`;
+}
+
+/**
  * The coworker's job, as one system message.
  *
  * It is an ordinary AG-UI system message rather than `forwardedProps` or framework-specific state
@@ -223,18 +247,21 @@ function claimsServerInstructionId(message: Message): boolean {
  */
 export function standingRoleMessage(
   profile: AgentStandingProfile,
+  instructions?: string,
 ): StandingRoleMessage {
+  const title = profile.title.trimEnd();
+  const titleEnd = /[.!?]$/.test(title) ? "" : ".";
   return {
     id: `${STANDING_ROLE_ID_PREFIX}${profile.id}`,
     role: "system",
     content: [
-      `You are ${profile.name}, ${profile.title}.`,
+      `You are ${profile.name}, ${title}${titleEnd} ${selfAddressGuidance(profile.name)}`,
       profile.roleDescription,
+      ...(instructions ? [instructions] : []),
       "This standing role applies in every channel. Treat channel messages as task-specific instructions within it.",
       /*
-       * Here rather than in the package, because for a remote Bot the standing role is the only
-       * instruction there is: `role_description` is one sentence somebody wrote about what it is
-       * for, and nothing else reaches it. The compliance Bot that answered a filing question with
+       * Shared by every remote Bot. Its own role describes the work, and OpenBot adds this
+       * guidance to the same message. The compliance Bot that answered a filing question with
        * thresholds and deadlines and no source was a `remote-ag-ui` agent whose entire prompt was
        * "Investigate policies, transaction monitoring, and control evidence."
        */
@@ -284,6 +311,41 @@ export function onOpenBotRunner(agent: RegisteredAgent): RegisteredAgent {
       ? agent.standingMessage.content.slice(0, -STANDING_GUIDANCE.length)
       : agent.standingMessage.content,
   };
+}
+
+/**
+ * Whether this deployment runs the agent behind a remote Bot: a harness it installed, which holds the
+ * deployment's own token. Any other address is somebody's own agent, run for their own purposes.
+ */
+function runByThisDeployment(agent: RegisteredAgent): boolean {
+  const token = process.env.MANAGED_AGENT_TOKEN;
+  return (
+    (agent.type === "remote_ag_ui" || agent.type === "remote_mastra") &&
+    !!token &&
+    agent.headers?.["x-openbot-agent-token"] === token
+  );
+}
+
+/**
+ * Whether the runtime's own runs on this Bot are answered here rather than at its endpoint.
+ *
+ * The runtime names a new conversation by running the conversation's Bot on a title prompt, and
+ * retries up to three times when the answer is not a short title. On an agent somebody registered
+ * by its address, that was three runs nobody asked for: answered as if the person had said it,
+ * spending their model and written into their agent's own history. So those runs are answered on
+ * OpenBot's own runner instead, as the Bot (`onOpenBotRunner`) on the deployment's model, the way a
+ * built-in Bot names its conversations and a check-in runs. A harness this deployment runs is its
+ * own, and keeps naming on its own model.
+ */
+function answersOwnRunsHere(
+  agent: RegisteredAgent,
+  holdsTools: HoldsTools | undefined,
+): boolean {
+  return (
+    !!holdsTools &&
+    (agent.type === "remote_ag_ui" || agent.type === "remote_mastra") &&
+    !runByThisDeployment(agent)
+  );
 }
 
 export type RuntimeModel = {
@@ -443,7 +505,12 @@ export function registeredAgentFromRow(
         ...(typeof remoteAgentId === "string" && remoteAgentId.length > 0
           ? { remoteAgentId }
           : {}),
-        standingMessage: standingRoleMessage(row),
+        standingMessage: standingRoleMessage(
+          row,
+          typeof configuration.standingInstructions === "string"
+            ? configuration.standingInstructions.trim()
+            : undefined,
+        ),
       }
     : null;
 }
@@ -546,6 +613,11 @@ export function builtInAgentConfiguration(
   waiting: ReadonlySet<string> = new Set(),
   /** When this run is, for the date the prompt ends with. A test pins it. */
   now: Date = new Date(),
+  /**
+   * The person's IANA time zone, already checked (`runTimeZone`), so the date is theirs. Absent: the
+   * date is given in UTC, and said to be.
+   */
+  timeZone?: string,
 ): BuiltInAgentConfiguration {
   if (!apiKey && !planModel) {
     return {
@@ -609,6 +681,13 @@ export function builtInAgentConfiguration(
      * their precedence sentence only means anything next to the role it defers to.
      */
     prompt: [
+      /*
+       * Who it is, first. Left off only where the prompt already says it: a remote Bot run here for
+       * a check-in (`onOpenBotRunner`) carries its standing role, which names it the same way.
+       */
+      ...(agent.systemPrompt.includes(selfAddressGuidance(agent.name))
+        ? []
+        : [identityGuidance(agent.name)]),
       agent.systemPrompt,
       ...(standing ? [standing] : []),
       /*
@@ -635,7 +714,7 @@ export function builtInAgentConfiguration(
         : []),
       ...(learnedSkills?.catalog ? [learnedSkills.catalog] : []),
       // Last, so everything above stays one prefix a provider can cache. See `todayGuidance`.
-      todayGuidance(now),
+      todayGuidance(now, timeZone),
     ].join("\n\n"),
     ...(planModel ? {} : { apiKey: apiKey ?? undefined }),
     // The run's thinking effort, when the person picked one the model takes. A plan's harness is
@@ -763,6 +842,14 @@ export async function buildAgents(
    * positional reason `loadInstructions` gives. Absent, every run uses the deployment's model.
    */
   pickedModel?: PickedModel,
+  /**
+   * The display name of every Bot whose answer may be in a conversation, by id, so the model is
+   * told which Bot answered (`bot-answers.ts`). After `pickedModel`, for the positional reason
+   * `loadInstructions` gives. Absent, the Bots being built are the ones named.
+   */
+  botNames: ReadonlyMap<string, string> = new Map(
+    agents.map((agent) => [agent.id, agent.name]),
+  ),
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -822,6 +909,7 @@ export async function buildAgents(
           recordToolLimitRefusal,
           holdsTools,
           pickedModel,
+          botNames,
         );
         if (loadPersonalMemory)
           built.use(new PersonalMemoryMiddleware(agent.id, loadPersonalMemory));
@@ -1090,6 +1178,8 @@ async function buildAgent(
   holdsTools?: HoldsTools,
   /** The model the person picked for this conversation. See {@link buildAgents}. */
   pickedModel?: PickedModel,
+  /** Who answered, by Bot id, for another Bot's answer in this one's thread. See {@link buildAgents}. */
+  botNames: ReadonlyMap<string, string> = new Map(),
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
@@ -1225,6 +1315,21 @@ async function buildAgent(
             };
           }
         : undefined,
+      botNames,
+      /*
+       * Built per run and holding nothing: a run the runtime makes for itself offers the Bot no tool
+       * on either path. See `answersOwnRunsHere`.
+       */
+      answersOwnRunsHere(agent, holdsTools)
+        ? () =>
+            buildAgent(
+              onOpenBotRunner(agent),
+              model,
+              apiKey,
+              stallGuard,
+              async () => [],
+            )
+        : undefined,
     );
   }
 
@@ -1293,6 +1398,8 @@ async function buildAgent(
     pinned?: ReadonlySet<string>,
     /** The model this run asked for and was allowed, or the deployment's. */
     runModel: RuntimeModel = model,
+    /** The person's time zone this run carries, for the date its prompt ends with. */
+    timeZone?: string,
   ) => {
     /*
      * What waits behind a search, decided where the run's tools are final. The count includes what
@@ -1326,6 +1433,8 @@ async function buildAgent(
         : undefined,
       learnedSkills,
       waiting,
+      undefined,
+      timeZone,
     );
     // What really waits: nothing, when the model could not be wrapped and is sent every tool.
     const held = searchesTools(
@@ -1358,6 +1467,8 @@ async function buildAgent(
        * or not there is anything to load, because a tool's picture is not a stored attachment;
        * see `tool-images.ts`.
        */
+      // Another Bot's answer, as that Bot's words rather than this one's. See `bot-answers.ts`.
+      attribute: (messages) => attributeBotAnswers(messages, botNames),
       inline: async (messages: AgentRunInput["messages"], threadId: string) =>
         inlineToolImages(
           loadAttachment
@@ -1395,13 +1506,26 @@ async function buildAgent(
         plan: runModel.plan?.provider,
       });
       /*
+       * The person's own time zone, when the browser that started this run said it, so the date the
+       * prompt ends with is theirs. See `person-time-zone.ts`.
+       */
+      const timeZone = runTimeZone(input.forwardedProps);
+      /*
        * A run the runtime makes for itself holds nothing of the Bot's: no grant, no subagent, no
        * handoff, no learned Skill. Built again with none, rather than told not to call them, so a
        * model that asks for one anyway asks for a tool this run does not have. See `isAskedRun`.
        * It still answers on the conversation's model, which is the one the gate judged and recorded.
        */
       if (holdsTools && !holdsTools(input))
-        return withTools([], input, signal, undefined, undefined, runModel);
+        return withTools(
+          [],
+          input,
+          signal,
+          undefined,
+          undefined,
+          runModel,
+          timeZone,
+        );
       const learnedSkills = await acquireLearnedSkills?.(agent.id, signal);
       signal.throwIfAborted();
       if (
@@ -1437,9 +1561,18 @@ async function buildAgent(
         tools.length === granted.length &&
         passing.length === 0 &&
         pinned.size === 0 &&
-        input.tools.length === 0
+        input.tools.length === 0 &&
+        !timeZone
         ? whole
-        : withTools(tools, input, signal, learnedSkills, pinned, runModel);
+        : withTools(
+            tools,
+            input,
+            signal,
+            learnedSkills,
+            pinned,
+            runModel,
+            timeZone,
+          );
     },
   );
 }
@@ -1528,14 +1661,16 @@ async function remoteTransport(
     : agentFetch;
 
   if (agent.type === "remote_ag_ui") {
-    return new HttpAgent({
-      url: agent.endpoint,
-      agentId: agent.id,
-      // The customer's own key, if their agent sits behind one. `HttpAgentConfig` is
-      // `{ url, headers?, fetch? }`, verified against @ag-ui/client 0.0.57.
-      ...(agent.headers ? { headers: agent.headers } : {}),
-      ...(dial ? { fetch: dial } : {}),
-    });
+    return withoutGenerativeUIEnvelope(
+      new HttpAgent({
+        url: agent.endpoint,
+        agentId: agent.id,
+        // The customer's own key, if their agent sits behind one. `HttpAgentConfig` is
+        // `{ url, headers?, fetch? }`, verified against @ag-ui/client 0.0.57.
+        ...(agent.headers ? { headers: agent.headers } : {}),
+        ...(dial ? { fetch: dial } : {}),
+      }),
+    );
   }
 
   const [{ MastraClient }, { getRemoteAgents }] = await Promise.all([
@@ -1577,7 +1712,43 @@ async function remoteTransport(
   });
 
   const picked = pickFromRoster(Object.keys(roster), agent);
-  return quotingConversationSystemRows(roster[picked] as AbstractAgent);
+  return withoutGenerativeUIEnvelope(
+    quotingConversationSystemRows(roster[picked] as AbstractAgent),
+  );
+}
+
+/**
+ * A run as an endpoint is sent it, without the browser's generative UI envelope.
+ *
+ * The browser declares the interface it can draw as `forwardedProps.copilotkit.ui`: the whole
+ * component catalog, about 100 KB. It is addressed to the runtime, whose middleware reads it before
+ * the run reaches this transport, turns it into the `render_ui` tool and the generative UI guide in
+ * `context`, and checks every `render_ui` call against it on the way back. The endpoint gets that
+ * tool and that guide either way, so the envelope was the same catalog a second time, on every turn,
+ * and was most of what a turn sent. No agent OpenBot runs reads it. The rest of `copilotkit` stays.
+ */
+function withoutGenerativeUIEnvelope(transport: AbstractAgent): AbstractAgent {
+  const run = transport.run.bind(transport);
+  const clone = transport.clone.bind(transport);
+  return Object.assign(transport, {
+    run: (input: RunAgentInput) => {
+      const props = input.forwardedProps;
+      if (
+        !isPlainObject(props) ||
+        !isPlainObject(props.copilotkit) ||
+        !Object.hasOwn(props.copilotkit, "ui")
+      )
+        return run(input);
+      const { ui: _envelope, ...copilotkit } = props.copilotkit;
+      const { copilotkit: _namespace, ...rest } = props;
+      return run({
+        ...input,
+        forwardedProps:
+          Object.keys(copilotkit).length > 0 ? { ...rest, copilotkit } : rest,
+      });
+    },
+    clone: () => withoutGenerativeUIEnvelope(clone() as AbstractAgent),
+  });
 }
 
 /** What a quoted row says it is. The Claude Agent SDK harness labels its replay the same way. */
@@ -1722,6 +1893,13 @@ function remoteAgentWithStandingRole(
   chooseModel?: (
     input: RunAgentInput,
   ) => Promise<{ model: string; reasoningEffort?: string } | undefined>,
+  /** Who answered, by Bot id, for another Bot's answer in this one's thread. See {@link buildAgents}. */
+  botNames: ReadonlyMap<string, string> = new Map(),
+  /**
+   * The Bot on OpenBot's own runner, which answers every run the runtime makes for itself instead of
+   * the endpoint. Absent, those runs go to the endpoint holding nothing. See `answersOwnRunsHere`.
+   */
+  answerOwnRuns?: () => Promise<AbstractAgent>,
 ) {
   const holds = (input: RunAgentInput) => !holdsTools || holdsTools(input);
   /*
@@ -1771,17 +1949,35 @@ function remoteAgentWithStandingRole(
           )
         : undefined;
     // Governed vendor/host calls use the actual AG-UI client lifecycle, so approvals capture
-    // the provider's toolCallId, messages and state. Coordination retains its signed callback.
+    // the provider's toolCallId, messages and state. Questions also need this fallback for
+    // harnesses that return AG-UI calls rather than executing signed deployment callbacks.
+    // Their handler still performs coordination authorization; backend results are not repeated.
     const clientTools = tools.filter(
       (tool) =>
-        typeof tool.execute === "function" &&
-        tool.name !== "message_bot" &&
-        tool.name !== "ask_person",
+        typeof tool.execute === "function" && tool.name !== "message_bot",
     );
     const clientNames = new Set(clientTools.map((tool) => tool.name));
+    // Callback-capable harnesses must retain their signed question route. The client
+    // fallback above only executes unanswered calls, so these lists may overlap.
     const deploymentTools = tools
-      .filter((tool) => !clientNames.has(tool.name))
+      .filter(
+        (tool) => tool.name === "ask_person" || !clientNames.has(tool.name),
+      )
       .map((tool) => tool.name);
+    /*
+     * What this side answers when the endpoint hands a call back unanswered.
+     *
+     * Coordination as well, because not every endpoint can call back. The Claude Agent SDK harness
+     * (the Claude-plan starter Bot) runs every tool it is offered as a client tool: it streams the
+     * call and ends its run for the caller to answer. Its `ask_person` then reached the browser,
+     * which only draws that tool, so no question was saved, the person saw no notice, and the reply
+     * they typed was sent as the unanswered call's "interrupted" result and lost. An endpoint that
+     * does call back answers the call in its own stream, and the middleware leaves an answered call
+     * alone, so nothing is asked or handed on twice.
+     */
+    const answeredHere = tools.filter(
+      (tool) => typeof tool.execute === "function",
+    );
     const forwardedProps = {
       ...(isPlainObject(input.forwardedProps) ? input.forwardedProps : {}),
       openbotBotId: agent.id,
@@ -1867,12 +2063,30 @@ function remoteAgentWithStandingRole(
       ]),
     ).pipe(
       switchMap(([messages, chosenModel]) => {
+        /*
+         * The standing role with what day it is, in the person's time zone when this run carries it,
+         * as the last paragraph. A Bot at another endpoint is told the date the way a built-in one
+         * is (`todayGuidance`), and in the one message every framework reads as its instructions:
+         * told nothing, the Claude Agent SDK harness answered "tomorrow" for the day after the
+         * person's. Only the day, so the role still changes once a day at most.
+         */
+        const standingMessage = {
+          ...agent.standingMessage,
+          content: `${agent.standingMessage.content}\n\n${todayGuidance(
+            new Date(),
+            runTimeZone(input.forwardedProps),
+          )}`,
+        };
         const prepared: RunAgentInput = {
           ...input,
           messages: [
-            agent.standingMessage,
+            standingMessage,
             ...(holdingsMessage ? [holdingsMessage] : []),
-            ...messages,
+            /*
+             * Another Bot's answer as that Bot's words, after the sanitiser and the attachments as
+             * on the built-in path. See `bot-answers.ts`.
+             */
+            ...attributeBotAnswers(messages, botNames),
           ],
           /*
            * The Bot's own grants, added to whatever the surface offered.
@@ -1897,7 +2111,7 @@ function remoteAgentWithStandingRole(
               ? [
                   ...callerMastraContext(input.context ?? []),
                   ...mastraOpenBotContext({
-                    standingMessage: agent.standingMessage,
+                    standingMessage,
                     holdingsMessage,
                     botId: agent.id,
                     deploymentTools,
@@ -1910,9 +2124,9 @@ function remoteAgentWithStandingRole(
             ? { ...forwardedProps, openbotModel: chosenModel }
             : forwardedProps,
         };
-        if (clientTools.length === 0) return next.run(prepared);
+        if (answeredHere.length === 0) return next.run(prepared);
         return new HeadlessToolsMiddleware(
-          clientTools.map((tool) => ({
+          answeredHere.map((tool) => ({
             definition: {
               name: tool.name,
               description: tool.description,
@@ -1937,6 +2151,12 @@ function remoteAgentWithStandingRole(
    */
   return new CloningRemoteAgent(remote, (target) => {
     target.use((input, next) => {
+      // First, so the endpoint is never dialled for it. The middleware the runtime adds after this
+      // one serves the endpoint's run and is skipped with it.
+      if (answerOwnRuns && !holds(input))
+        return defer(() => from(answerOwnRuns())).pipe(
+          switchMap((own) => own.run(input)),
+        );
       const stream = defer(() =>
         from(
           holds(input)
@@ -2108,7 +2328,10 @@ export async function resolveRuntimeAgents(
   // what that means, exactly as it would have from a roster that did not contain it.
   if (registered.length === 0) return {};
 
-  const apiKey = registered.some((agent) => agent.type === "built_in")
+  const apiKey = registered.some(
+    (agent) =>
+      agent.type === "built_in" || answersOwnRunsHere(agent, holdsTools),
+  )
     ? await resolveModelApiKey()
     : null;
   return buildAgents(
@@ -2132,6 +2355,9 @@ export async function resolveRuntimeAgents(
     recordToolLimitRefusal,
     holdsTools,
     pickedModel,
+    // Every Bot this person has, not only the one being built: an answer in its thread can be any
+    // of theirs.
+    new Map(all.map((agent) => [agent.id, agent.name])),
   );
 }
 

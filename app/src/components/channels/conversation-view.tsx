@@ -8,7 +8,10 @@ import {
   useState,
 } from "react";
 import { useBotLook } from "@/components/agents/bot-look";
-import { ChatTranscript } from "@/components/channels/chat-transcript";
+import {
+  ChatTranscript,
+  skillLabels,
+} from "@/components/channels/chat-transcript";
 import {
   type AgentOption,
   type CommandOption,
@@ -41,6 +44,7 @@ export function ConversationView({
   queueWhileBusy = false,
   restoring = false,
   intro,
+  starterSuggestions,
   onSubmit,
   onStop,
   voiceCall,
@@ -110,6 +114,8 @@ export function ConversationView({
    * where Bots are orbs (`useBotLook`); elsewhere the transcript starts at its first message.
    */
   intro?: ReactNode;
+  /** One-time starter tasks, separate from the Bot introduction and its attribution. */
+  starterSuggestions?: ReactNode;
   onSubmit: (draft: ComposerDraft) => void | Promise<void>;
   /** Stop the Bot mid-answer; forwarded to turn the send button into a stop button. */
   onStop?: () => void;
@@ -436,19 +442,17 @@ export function ConversationView({
     <div className="flex flex-col flex-1 min-h-0">
       <div className="flex flex-1 min-h-0">
         {/*
-         * The command NAMES, joined, rather than the option objects.
+         * The commands and their names as one string, rather than the option objects.
          *
          * The transcript needs them only to tell a real skill chip from a message that happens to
-         * begin with a slash, and its message rows are memoised on primitives — handing them an
+         * begin with a slash, and to name it; its message rows are memoised on primitives — handing them an
          * array would give every message a new prop identity on each refetch and re-render the whole
          * conversation to change nothing.
          */}
         <ChatTranscript
           threadId={threadId}
           busy={busy}
-          commandNames={(commands ?? [])
-            .map((command) => command.name)
-            .join(",")}
+          commandLabels={skillLabels(commands ?? [])}
           {...(orbs && intro ? { intro } : {})}
           messages={messages}
           onRemoveQueued={(id) => {
@@ -481,6 +485,7 @@ export function ConversationView({
         {messages.some((message) => message.role === "user") ? (
           <NotifyPrompt />
         ) : null}
+        {starterSuggestions}
         <Composer
           modelPicker={modelPicker}
           agents={agents}

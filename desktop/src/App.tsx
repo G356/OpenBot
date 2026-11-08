@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { CheckForUpdates } from "./CheckForUpdates";
 import { CopilotKitAccount } from "./CopilotKitAccount";
 import { useWindowFitsContent } from "./fitWindow";
 import { DEFAULT_HARNESS, type HarnessChoice } from "./harness";
@@ -24,7 +25,6 @@ import {
   ProviderPicker,
   recordedModel,
 } from "./ProviderPicker";
-import { ShellUpdates } from "./ShellUpdates";
 import { Sections } from "./Sections";
 import { StartFresh } from "./StartFresh";
 import {
@@ -123,6 +123,8 @@ function Setup() {
   const [showing, setShowing] = useState(false);
   // Start could not move the deployment to this app's release, and started the one it had.
   const [releaseNotice, setReleaseNotice] = useState<Problem | null>(null);
+  // The back end is ready on the release it had, and its update did not finish.
+  const [backEndNotice, setBackEndNotice] = useState<string | null>(null);
   const [step, setStep] = useState<SetupStep>("welcome");
   const [steps, setSteps] = useState<Progress[]>([]);
   const [busy, setBusy] = useState(false);
@@ -380,13 +382,9 @@ function Setup() {
         return next;
       });
     });
-    const updateStopped = listen<void>("runtime:update-stopped", () => {
-      if (active) setRunning(false);
-    });
     return () => {
       active = false;
       stop.then((unlisten) => unlisten());
-      updateStopped.then((unlisten) => unlisten());
     };
   }, [recoverFromStart]);
 
@@ -520,6 +518,7 @@ function Setup() {
     setBusy(true);
     setFailure(null);
     setReleaseNotice(null);
+    setBackEndNotice(null);
     setSteps([]);
     try {
       const startWith = {
@@ -556,10 +555,12 @@ function Setup() {
       setStep("connect");
       setRefreshIntelligence(false);
       // An upgrade that did not happen is said on the running screen first; Show OpenBot hands over.
-      if (outcome?.notice) {
+      // So is a back end that runs the release it had because its own update did not finish.
+      if (outcome?.notice || intelligence.notice) {
         // The notice says what the rows would: it is the one thing on the screen.
         setSteps([]);
-        setReleaseNotice(outcome.notice);
+        setReleaseNotice(outcome?.notice ?? null);
+        setBackEndNotice(intelligence.notice ?? null);
         return "started";
       }
       await invoke("show_openbot");
@@ -579,24 +580,8 @@ function Setup() {
     }
   }
 
-  async function applyShellUpdate(version: string) {
-    setBusy(true);
-    setFailure(null);
-    try {
-      return await invoke("apply_shell_update", {
-        root: root.trim(),
-        version,
-        restartAcknowledged: true,
-      });
-    } catch (error) {
-      recoverFromStart(error);
-      throw error;
-    } finally {
-      setBusy(false);
-    }
-  }
   // OpenBot's own updates. The installation follows the app: Start upgrades it to the app's release.
-  const appUpdates = <ShellUpdates key={root} onApply={applyShellUpdate} />;
+  const appUpdates = <CheckForUpdates />;
 
   /** The leftovers go first, then Start carries on: starting fresh is one choice, not two. */
   async function startFresh(volumes: string[], containers: string[]) {
@@ -1038,7 +1023,14 @@ function Setup() {
           back here, and a heading that still says everything is running while the box underneath
           names the process that stopped is a screen arguing with itself. */}
         <h1>{displayedFailure ? "OpenBot stopped" : "OpenBot is running"}</h1>
-        {!displayedFailure && !releaseNotice && (
+        {/* The back end runs the release it had: information, said where the lede goes. Nothing
+          failed, so it is not drawn as a failure and offers no help. */}
+        {!displayedFailure && backEndNotice && (
+          <p className="lede" role="status">
+            {backEndNotice}
+          </p>
+        )}
+        {!displayedFailure && !releaseNotice && !backEndNotice && (
           <p className="lede">
             OpenBot is open in this window. You can also show it or stop it from
             the menu bar.

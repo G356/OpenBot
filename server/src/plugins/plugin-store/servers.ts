@@ -20,7 +20,6 @@ import {
   toolkitOfFor,
 } from "../access";
 import { ownerGrantsOf } from "../app-access";
-import { sharedAccountOnly } from "../deployment-clients";
 import {
   type BrokerConnection,
   BrokerUnconfiguredError,
@@ -36,6 +35,7 @@ import {
   serverCredentialKind,
   tokenHeaderFor,
 } from "../catalogue";
+import { sharedAccountOnly } from "../deployment-clients";
 import type { ListedTool } from "../mcp";
 import {
   type AccountMode,
@@ -51,8 +51,10 @@ import {
   CustomServerRefusedError,
   DEPLOYMENT_ACTOR,
   effectiveUrl,
+  initiatedBy,
   isDeploymentFault,
   iso,
+  LISTING_REVISION,
   MEMORY_TOOLS_SERVER,
   PluginInvariantError,
   type ServerAddress,
@@ -212,6 +214,8 @@ export function serverMethods(context: StoreContext) {
         eventType: "configuration.changed",
         targetType: "mcp_server",
         targetId: resolved.entry.key,
+        // OpenBot adds Routines at its first start, and the personal edition's web search.
+        ...initiatedBy(input.by),
         payload: {
           actor: input.by,
           change: "mcp_server_added",
@@ -295,10 +299,10 @@ export function serverMethods(context: StoreContext) {
        * whether or not this deployment brokers through it today, and a reservation spelled twice is
        * the one that gets added to once. Each refusal still names the id it refused.
        */
-      for (const [screen, { vendor }] of BROKERED_SCREEN_NAMES) {
+      for (const [screen] of BROKERED_SCREEN_NAMES) {
         if (input.id === screen) {
           throw new CustomServerRefusedError(
-            `${screen} is the name of this deployment's own ${vendor} screen, so a server added there could never be opened. Choose another.`,
+            `${screen} is the name of one of OpenBot's own screens, so a server added there could never be opened. Choose another.`,
           );
         }
       }
@@ -327,10 +331,10 @@ export function serverMethods(context: StoreContext) {
        * and a policy rule are written against, so a row shadowing another path's namespace inherits
        * rules that were written about something else.
        */
-      for (const { idPrefix, vendor } of BROKERED_ID_PREFIXES) {
+      for (const { idPrefix } of BROKERED_ID_PREFIXES) {
         if (input.id.startsWith(idPrefix)) {
           throw new CustomServerRefusedError(
-            `Names beginning ${idPrefix} belong to the ${vendor} apps this deployment enables, so ${input.id} is not a name a server added by URL can take. Choose another.`,
+            `Names beginning ${idPrefix} are kept for the apps people connect through OpenBot, so ${input.id} can't be used for a server added by URL. Choose another.`,
           );
         }
       }
@@ -600,7 +604,7 @@ export function serverMethods(context: StoreContext) {
       const rowId = `${profile.idPrefix}${input.slug}`;
       if (toolkitOfFor(brokerProvider, url) !== input.slug) {
         throw new CustomServerRefusedError(
-          `${input.slug} is not a name ${brokerProvider === "arcade" ? "an" : "a"} ${profile.vendor} app can have. An app is named in letters, numbers, underscores and hyphens, because that name is read back out of this row's url to decide which app a call is against.`,
+          `${input.slug} isn't a name an app can have. An app is named in letters, numbers, underscores and hyphens.`,
         );
       }
 
@@ -1898,6 +1902,8 @@ export function serverMethods(context: StoreContext) {
           // Cleared: the listing was stored. The names it left out are a warning — see above.
           lastError: null,
           skippedTools: skipped.length > 0 ? skipped : null,
+          // Recorded by this build's reading of a listing; see `relistOutdatedBrokeredApps`.
+          listingRevision: LISTING_REVISION,
           updatedAt: new Date(),
         })
         .where(eq(mcpServers.id, serverId));
@@ -1929,6 +1935,7 @@ export function serverMethods(context: StoreContext) {
           eventType: "configuration.changed",
           targetType: "mcp_server",
           targetId: serverId,
+          ...initiatedBy(auditActor),
           payload: {
             actor: auditActor,
             change: "grants_not_advertised",
@@ -1959,6 +1966,7 @@ export function serverMethods(context: StoreContext) {
           eventType: "configuration.changed",
           targetType: "mcp_server",
           targetId: serverId,
+          ...initiatedBy(auditActor),
           payload: {
             actor: auditActor,
             change: "unlisted_tools_advertised",
@@ -1994,6 +2002,115 @@ export function serverMethods(context: StoreContext) {
      * Through `this`, so the personal edition's wrapper gives every Bot the tools exactly as a
      * Refresh would.
      */
+    /**
+     * Bring the saved tool list of every app whose tools are this deployment's own code (Routines,
+     * Drive) up to date with the code that is running. Answers the apps it refreshed.
+     *
+     * CRITERION. After an upgrade, a Bot is offered the names, descriptions and schemas of the build
+     * it runs on, not the build that added the app.
+     *
+     * REASON. A listing is saved when an app is added and replaced only by {@link refreshTools}, which
+     * runs when an app is added, when one with no tools is connected, and when an admin presses
+     * Refresh. For a vendor's app that is right: asking costs a request, and the vendor decides what
+     * it offers. For an app whose tools are this code, the saved list is a copy of an older build, so
+     * a release that renames a tool or rewords a description never reached an existing install. The
+     * personal edition (OpenBot Desktop) has no Admin page to press Refresh on, and a team's admin
+     * has no reason to. Found when a goal's trigger tools kept telling the model about "the Bot's
+     * Responsibilities page" after the page and the code both said Goals.
+     *
+     * ONLY WHAT CHANGED, compared row by row, so an ordinary start writes nothing and leaves no trail.
+     * Refreshed through `this`, as a Refresh would be: grants are keyed by name and are not touched,
+     * an app turned off is not here to refresh, and the personal edition's wrapper gives every Bot a
+     * tool that is new. A failure is a warning, never a failed start: the saved list keeps working,
+     * and the next start tries again.
+     */
+    async refreshOwnListings(): Promise<string[]> {
+      const refreshed: string[] = [];
+      const rows = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .orderBy(asc(mcpServers.id));
+      for (const { id } of rows) {
+        const kind = catalogueEntry(id)?.transport;
+        if (!kind || !transportFor(kind).listIsThisCode) continue;
+        try {
+          const { row, entry } = await requireServer(id);
+          const listed = await transportFor(kind).listTools({
+            url: effectiveUrl(row, entry),
+            tokenHeader: tokenHeaderFor(entry),
+          });
+          const held = await database
+            .select()
+            .from(mcpTools)
+            .where(eq(mcpTools.serverId, id));
+          if (sameListing(held, storableTools(id, listed).rows)) continue;
+          await this.refreshTools(id);
+          refreshed.push(id);
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              type: "own-app-tools-refresh-failed",
+              serverId: id,
+              error: reasonWithoutStatement(error),
+            }),
+          );
+        }
+      }
+      return refreshed;
+    },
+
+    /**
+     * Lists again, once, every app of the active broker whose tools were recorded by an older reading
+     * of a listing (`mcpServers.listingRevision` behind {@link LISTING_REVISION}).
+     *
+     * CRITERION. After an upgrade, an app's actions are recorded as a fresh install would record
+     * them, without anybody pressing Refresh tools.
+     *
+     * REASON. #1177 records an action its broker says nothing about as `unclassified`, where Arcade's
+     * had been recorded as `destructive`, which always asks. A row listed before it can't be told
+     * from an action Arcade did flag (both are a destructive write), so it is not rewritten in a
+     * migration: the app is asked again. A flagged action comes back destructive and still asks, a
+     * delete or archive name still asks by its name, and only the silence stops asking.
+     *
+     * Only the active broker's apps: a broker lists with the deployment's own key, so nobody's
+     * account is needed, and an app of a broker this deployment no longer uses can't be asked. A
+     * refresh that fails leaves the revision behind, so the next attempt tries again; what is stored
+     * keeps working, and asks as before, until then. Answers the apps still behind.
+     */
+    async relistOutdatedBrokeredApps(): Promise<string[]> {
+      if (!broker) return [];
+      const outdated = await database
+        .select({ id: mcpServers.id })
+        .from(mcpServers)
+        .where(
+          and(
+            eq(mcpServers.provenance, brokerProvider),
+            sql`${mcpServers.listingRevision} < ${LISTING_REVISION}`,
+          ),
+        )
+        .orderBy(asc(mcpServers.id));
+      const behind: string[] = [];
+      for (const { id } of outdated) {
+        try {
+          await this.refreshTools(id);
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              type: "brokered-app-relist-failed",
+              serverId: id,
+              error: reasonWithoutStatement(error),
+            }),
+          );
+        }
+        const [after] = await database
+          .select({ revision: mcpServers.listingRevision })
+          .from(mcpServers)
+          .where(eq(mcpServers.id, id));
+        if (after && after.revision < LISTING_REVISION) behind.push(id);
+      }
+      return behind;
+    },
+
     async discoverToolsOnConnect(
       serverId: string,
       userId: string,
@@ -2351,4 +2468,43 @@ export function serverMethods(context: StoreContext) {
         .where(eq(mcpServers.id, app?.id ?? serverId));
     },
   };
+}
+
+/**
+ * Whether what is saved for an app is what its listing would save now: the same names, and for each
+ * the same words, schema and classification. Schemas are compared with their keys sorted, because
+ * PostgreSQL's `jsonb` keeps keys in an order of its own and gives them back in that order.
+ */
+function sameListing(
+  held: (typeof mcpTools.$inferSelect)[],
+  wanted: StorableTool[],
+): boolean {
+  if (held.length !== wanted.length) return false;
+  const saved = new Map(held.map((tool) => [tool.name, tool]));
+  return wanted.every((tool) => {
+    const was = saved.get(tool.name);
+    return (
+      was !== undefined &&
+      was.vendorName === tool.vendorName &&
+      was.description === tool.description &&
+      sortedJson(was.inputSchema) === sortedJson(tool.inputSchema) &&
+      was.effect === tool.effect &&
+      was.destructive === tool.destructive &&
+      was.unclassified === tool.unclassified &&
+      was.declaredRead === tool.declaredRead &&
+      was.version === tool.version
+    );
+  });
+}
+
+function sortedJson(value: unknown): string {
+  return JSON.stringify(value, (_key, inner: unknown) =>
+    inner && typeof inner === "object" && !Array.isArray(inner)
+      ? Object.fromEntries(
+          Object.entries(inner).sort(([left], [right]) =>
+            left < right ? -1 : left > right ? 1 : 0,
+          ),
+        )
+      : inner,
+  );
 }

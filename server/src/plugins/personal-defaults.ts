@@ -1,8 +1,14 @@
-import { and, eq, isNull, like } from "drizzle-orm";
+import { and, eq, isNull, like, sql } from "drizzle-orm";
+import {
+  type AuditStore,
+  DEPLOYMENT_INITIATOR,
+  recordAuditEvent,
+} from "../audit";
 import type { Database } from "../db/client";
 import { reasonWithoutStatement } from "../db/query-failure";
 import { enterpriseSettings } from "../db/schema/admin";
 import { agentProfiles } from "../db/schema/coworker";
+import { learningSettings } from "../db/schema/learning";
 import {
   mcpServers,
   mcpTools,
@@ -21,6 +27,12 @@ type Store = {
     agentId: string,
     by: string,
     as?: "admin" | "owner",
+  ): Promise<void>;
+  grantTools(
+    app: string,
+    refs: string[],
+    agentId: string,
+    by: string,
   ): Promise<void>;
   listForAgent(agentId: string): Promise<unknown>;
   installSkill(input: { slug: string; by: string }): Promise<void>;
@@ -45,6 +57,11 @@ export type PersonalDefaultsDeps = {
   skillsGiven(agentId: string): Promise<boolean>;
   /** Writes down that it has, so a skill switched off for it stays off. */
   rememberSkillsGiven(agentId: string): Promise<void>;
+  /**
+   * Takes every Bot left out of Automatic Learning (a per-Bot mapping of null) back in, so it
+   * follows the default container like every other Bot. Answers the Bots it took back in.
+   */
+  includeEveryBotInLearning(): Promise<string[]>;
 };
 
 /** Who the trail names for a grant nobody pressed a button for. */
@@ -83,9 +100,13 @@ export const EVERY_BOT_ASKS_REFUSAL =
  * Gives Bots every tool of these apps they don't hold yet. Writes nothing when they hold them all,
  * so asking on every run costs reads and no trail rows. The trail names why: Routines' grants as
  * always on, any other app's as `by`.
+ *
+ * One trail row per Bot and app, naming every tool it was given, and started by OpenBot when `by`
+ * is OpenBot's own (see `initiatedBy`). An upgrade that added seven goal tools to Routines wrote one
+ * row per tool for every Bot, each saying a person had changed a setting.
  */
 async function grantEveryTool(
-  store: Pick<Store, "grant">,
+  store: Pick<Store, "grantTools">,
   deps: PersonalDefaultsDeps,
   apps: string[],
   bots: string[],
@@ -97,9 +118,12 @@ async function grantEveryTool(
     const grantedBy = isAlwaysOn(app) ? ALWAYS_ON_BY : by;
     for (const bot of bots) {
       const held = await deps.granted(bot, app);
-      for (const tool of tools)
-        if (!held.has(tool.ref))
-          await store.grant("mcp", tool.ref, bot, grantedBy);
+      const missing = tools
+        .map((tool) => tool.ref)
+        .filter((ref) => !held.has(ref))
+        .sort();
+      if (missing.length > 0)
+        await store.grantTools(app, missing, bot, grantedBy);
     }
   }
 }
@@ -139,6 +163,32 @@ export async function ensurePersonalSkills(
   await giveEverySkillOnce(store, deps, await deps.bots());
 }
 
+/**
+ * In the personal edition every Bot takes part in Automatic Learning: its conversations go to the
+ * Learning container and it uses every Skill learned there and in the person's own space. There is
+ * no switch for one Bot there (the Admin screen that has one is the team edition's), so a Bot left
+ * out, which only a team edition's settings in the same database can do, is taken back in. At
+ * startup for the Bots that exist; every Bot's first listing or run checks again (see
+ * `withPersonalDefaults`). A Bot made later has no mapping and follows the default already.
+ *
+ * Writes only when a Bot was left out, and then an audit row naming the Bots, started by OpenBot.
+ */
+export async function ensurePersonalLearning(
+  deps: Pick<PersonalDefaultsDeps, "includeEveryBotInLearning">,
+  audit?: AuditStore,
+): Promise<string[]> {
+  if (currentEdition() !== "personal") return [];
+  const included = await deps.includeEveryBotInLearning();
+  if (included.length > 0 && audit)
+    await recordAuditEvent(audit, {
+      eventType: "configuration.changed",
+      targetType: "learning",
+      initiator: DEPLOYMENT_INITIATOR,
+      payload: { change: "every_bot_included_personal", bots: included },
+    });
+  return included;
+}
+
 /** The apps every Bot holds every tool of: all of them in the personal edition, else Routines. */
 async function everyBotApps(deps: PersonalDefaultsDeps): Promise<string[]> {
   return currentEdition() === "personal"
@@ -147,19 +197,25 @@ async function everyBotApps(deps: PersonalDefaultsDeps): Promise<string[]> {
 }
 
 /**
- * At startup, in every edition: add Routines if it isn't added, and give every Bot all of its tools.
- * The ones that change things too, because scheduling is the point; a Bot still asks before each one
- * runs while Ask before acting is on.
+ * At startup, in every edition: add Routines if it isn't added, bring the saved tools of every app
+ * whose tools are OpenBot's own code up to date with this build (see `refreshOwnListings`), and give
+ * every Bot all of Routines' tools. The ones that change things too, because scheduling is the point;
+ * a Bot still asks before each one runs while Ask before acting is on.
+ *
+ * Brought up to date before the grants, so a tool this build adds to Routines is given to every Bot
+ * at the same start rather than the one after.
  */
 export async function ensureAlwaysOnApp(
-  store: Pick<Store, "grant"> & {
+  store: Pick<Store, "grantTools"> & {
     serverAddress(serverId: string): Promise<unknown>;
     addServer(input: { key: string; by: string }): Promise<unknown>;
+    refreshOwnListings(): Promise<string[]>;
   },
   deps: PersonalDefaultsDeps,
 ): Promise<void> {
   if (!(await store.serverAddress(ALWAYS_ON_APP)))
     await store.addServer({ key: ALWAYS_ON_APP, by: ALWAYS_ON_BY });
+  await store.refreshOwnListings();
   await grantEveryTool(
     store,
     deps,
@@ -314,8 +370,9 @@ export function withPersonalDefaults<S extends Store>(
 
   /*
    * A Bot made after startup gets what every Bot has the first time it runs: Routines in every
-   * edition, and every connected app and every skill in the personal one. What a run is offered is
-   * what this answers, so it is the one moment every Bot, new or old, passes through.
+   * edition, and every connected app, every skill and Automatic Learning in the personal one. What a
+   * run is offered is what this answers, so it is the one moment every Bot, new or old, passes
+   * through.
    */
   const list = store.listForAgent;
   store.listForAgent = async function (this: S, agentId: string) {
@@ -327,6 +384,7 @@ export function withPersonalDefaults<S extends Store>(
       GRANTED_BY,
     );
     await giveEverySkillOnce(this, deps, [agentId]);
+    if (currentEdition() === "personal") await deps.includeEveryBotInLearning();
     return list.call(this, agentId);
   } as S["listForAgent"];
 
@@ -425,6 +483,45 @@ export function personalDefaultsDeps(database: Database): PersonalDefaultsDeps {
           updatedBy: GRANTED_BY,
         })
         .onConflictDoNothing();
+    },
+    /*
+     * One statement on the one settings row, so it cannot lose a change saved at the same moment and
+     * keeps every other key as it is. Matches no row, and writes nothing, while no Bot is left out.
+     */
+    async includeEveryBotInLearning() {
+      const rows = await database.execute<{ bots: string[] }>(sql`
+        WITH old AS (
+          SELECT ${learningSettings.settings} AS settings
+          FROM ${learningSettings}
+          WHERE ${learningSettings.id} = 'current'
+          FOR UPDATE
+        )
+        UPDATE ${learningSettings}
+        SET settings = jsonb_set(
+              ${learningSettings.settings},
+              '{agents}',
+              COALESCE(
+                (SELECT jsonb_object_agg(bot, target)
+                 FROM jsonb_each(${learningSettings.settings}->'agents') AS mapping(bot, target)
+                 WHERE target <> 'null'::jsonb),
+                '{}'::jsonb
+              )
+            ),
+            updated_at = now()
+        FROM old
+        WHERE ${learningSettings.id} = 'current'
+          AND jsonb_typeof(old.settings->'agents') = 'object'
+          AND EXISTS (
+            SELECT 1 FROM jsonb_each(old.settings->'agents') AS mapping(bot, target)
+            WHERE target = 'null'::jsonb
+          )
+        RETURNING (
+          SELECT COALESCE(array_agg(bot ORDER BY bot), '{}')
+          FROM jsonb_each(old.settings->'agents') AS mapping(bot, target)
+          WHERE target = 'null'::jsonb
+        ) AS bots
+      `);
+      return [...rows].flatMap((row) => row.bots);
     },
     async skillExists(slug) {
       const [row] = await database

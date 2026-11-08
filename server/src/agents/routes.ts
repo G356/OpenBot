@@ -1,3 +1,4 @@
+import { declaredHarness } from "@openbot/shared/harnesses";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AuditEventType, AuditStore } from "../audit";
@@ -38,6 +39,8 @@ type AgentInputObject = {
   endpoint?: unknown;
   auth?: unknown;
   isolated?: unknown;
+  instructions?: unknown;
+  harness?: unknown;
 };
 
 /**
@@ -139,6 +142,34 @@ export function parseAgentInput(
   }
   const isolated = input.isolated;
 
+  /*
+   * The framework a person named for an agent they run themselves, by its id in the harness list.
+   * Kept only with an address: a Bot with none runs here, on OpenBot. See `frameworkOf`.
+   */
+  let harness: string | undefined;
+  if (input.harness !== undefined && input.harness !== "") {
+    const named = declaredHarness(input.harness);
+    if (!named)
+      return {
+        ok: false,
+        error: "OpenBot doesn't know that framework. Pick one from the list.",
+      };
+    if (endpoint) harness = named.id;
+  }
+
+  // Absent leaves them as they are. Only the personal starter keeps instructions apart from what
+  // it does, and the same limit holds for them as held when they were edited as that text.
+  let instructions: string | undefined;
+  if (input.instructions !== undefined) {
+    const bounded = boundedText(
+      input.instructions,
+      1000,
+      "Instructions must be text between 1 and 1000 characters.",
+    );
+    if (typeof bounded !== "string") return bounded;
+    instructions = bounded;
+  }
+
   return {
     ok: true,
     value: {
@@ -149,6 +180,8 @@ export function parseAgentInput(
       endpoint,
       auth,
       ...(isolated === undefined ? {} : { isolated }),
+      ...(instructions === undefined ? {} : { instructions }),
+      ...(harness === undefined ? {} : { harness }),
     },
   };
 }
@@ -359,6 +392,15 @@ export function createAgentRoutes(
      */
     runsOnOpenBotModel:
       agent.endpoint === null || takesModelChoice(agent.endpoint),
+    /*
+     * Whether OpenBot gives it a key on every run, as it does at every address it runs itself: the
+     * Bot in the box and the harness picked in setup (see runtime-agents.ts). Such a Bot uses its
+     * tools with no key of its own, so its Setup page must not say it can't.
+     */
+    keyFromOpenBot:
+      typeof agent.endpoint === "string" &&
+      managedRun !== undefined &&
+      isManagedEndpoint(agent.endpoint, managedRun.endpoints),
   });
   /**
    * The dtos, each with whether its computer of its own is in effect now.
@@ -993,6 +1035,8 @@ function agentDto(actor: AgentActor, agent: AgentProfile) {
     hasCallbackToken: agent.hasCallbackToken,
     // What the owner asked for. Whether it is in effect is `isolationActive`, added by the route.
     isolated: agent.isolated,
+    // The personal starter's, for its Setup page. No other Bot's DTO carries any.
+    ...(agent.instructions ? { instructions: agent.instructions } : {}),
     canManage: canManageAgent(actor, agent),
     // Ownership, kept separate from permission. `canManage` is also true for an administrator on
     // another user's coworker, so a roster that split "mine" on it would file other people's work

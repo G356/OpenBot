@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, cleanup, render, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -59,6 +60,10 @@ mock.module("@tauri-apps/api/event", () => ({
 
 mock.module("./Mark", () => ({
   Mark: ({ name }: { name: string }) => <span>{name}</span>,
+  // The mark a "Sign in with" button carries, by the id it was given. The real one draws that
+  // vendored file, which needs Vite's glob.
+  ButtonMark: ({ id }: { id: string | null }) =>
+    id ? <img alt="" data-mark={id} /> : null,
 }));
 
 const { App } = await import("./App");
@@ -273,12 +278,14 @@ function localStatus(readiness: string, licence: string) {
       },
       hasFailedStep: false,
       updateInProgress: false,
+      unfinishedUpdate: null,
       observed: null,
     },
     reason: null,
     readiness,
     licence,
     licenceExpiresAt: null,
+    checksPassed: false,
   };
 }
 
@@ -1137,6 +1144,94 @@ test("relaunch says it is starting while it starts, and never offers a CopilotKi
   expectPlain(view);
 });
 
+/*
+ * The bug, on a signed 0.3.2 on Windows: the stopped window's update check asked an old mechanism
+ * release builds do not carry (`check_shell_update`), and said "Signed desktop shell updates are
+ * not configured. This build does not include the optional updater feature." Both commands answer
+ * here as a release build answered them, so only the one the window asks decides what it says.
+ */
+test("the stopped window's update check asks the update feed and says this version is up to date", async () => {
+  setupConnectedLocalStack(
+    "/tmp/check-for-updates",
+    localStatus("ready", "valid"),
+  );
+  const previous = invokeHandler;
+  invokeHandler = async (command, args) => {
+    if (command === "app_update_offer")
+      return {
+        version: null,
+        current: "0.3.2",
+        installing: null,
+        updatesItself: true,
+      };
+    if (command === "check_app_update")
+      return { found: "upToDate", current: "0.3.2" };
+    if (command === "check_shell_update")
+      return {
+        configured: false,
+        available: false,
+        version: null,
+        detail:
+          "Signed desktop shell updates are not configured. This build does not include the optional updater feature.",
+      };
+    return previous(command, args);
+  };
+  const view = await renderApp();
+  await view.findByRole("heading", { name: "OpenBot is running" });
+  await userEvent.click(view.getByRole("button", { name: "Stop OpenBot" }));
+  await view.findByRole("heading", { name: "OpenBot is stopped" });
+  await userEvent.click(view.getByRole("button", { name: /^Check/ }));
+  await waitFor(() =>
+    expect(view.getByText("OpenBot 0.3.2 is up to date.")).toBeTruthy(),
+  );
+  expect(view.queryByText(/not configured/)).toBeNull();
+  expect(view.getByText(/^OpenBot updates itself/)).toBeTruthy();
+  expect(
+    invokeCalls.filter(
+      (call) =>
+        call.command.includes("update") && call.command !== "app_update_offer",
+    ),
+  ).toEqual([{ command: "check_app_update", args: undefined }]);
+});
+
+/*
+ * The bug, on an internal build on Windows: the stopped window's Updates section opened with
+ * "OpenBot updates itself with signed updates from its publisher", and Check for updates then said
+ * "This version of OpenBot doesn't update itself" in the same box. A build that never updates
+ * itself now says so up front, with no promise and nothing to check.
+ */
+test("the stopped window on a build that never updates itself says so and promises no updates", async () => {
+  setupConnectedLocalStack(
+    "/tmp/check-for-updates-internal",
+    localStatus("ready", "valid"),
+  );
+  const previous = invokeHandler;
+  invokeHandler = async (command, args) => {
+    if (command === "app_update_offer")
+      return {
+        version: null,
+        current: "0.3.2-internal.731.gabc1234",
+        installing: null,
+        updatesItself: false,
+      };
+    if (command === "check_app_update")
+      return { found: "notOffered", current: "0.3.2-internal.731.gabc1234" };
+    return previous(command, args);
+  };
+  const view = await renderApp();
+  await view.findByRole("heading", { name: "OpenBot is running" });
+  await userEvent.click(view.getByRole("button", { name: "Stop OpenBot" }));
+  await view.findByRole("heading", { name: "OpenBot is stopped" });
+  await view.findByText(
+    "This version of OpenBot doesn't update itself. Install a released version of OpenBot to get updates.",
+  );
+  expect(view.queryByText(/updates itself with|signed updates/)).toBeNull();
+  expect(view.queryByRole("button", { name: /^Check/ })).toBeNull();
+  expect(
+    invokeCalls.filter((call) => call.command === "check_app_update"),
+  ).toEqual([]);
+});
+
 test("Quit shows Shutting down with each part's row as it starts and ends", async () => {
   setupConnectedLocalStack(
     "/tmp/local-eval-quit-screen",
@@ -1640,6 +1735,155 @@ test("relaunch never starts a local stack that is not exactly ready and valid", 
     cleanup();
     invokeCalls = [];
   }
+});
+
+/**
+ * What `run_local_eval` answers for `status` from the CLI this app pins, for a back end whose
+ * update to 0.16.0-rc.9 stopped at the image download. `local_eval_ipc_tests.rs` runs the real CLI
+ * over that record and checks its answers are these, so the window is tested against what the CLI
+ * really says.
+ */
+const pinnedCli = JSON.parse(
+  readFileSync(
+    new URL(
+      "../src-tauri/test-fixtures/local-eval/update-did-not-finish.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+const KEPT_RELEASE =
+  "The back end is running 0.16.0-rc.5. Downloading 0.16.0-rc.9 did not finish, so OpenBot tries again the next time it starts.";
+
+/** `local update` as the CLI answers when it stops at the image download again. */
+const updateFailed = {
+  ...localStatus("unknown", "unknown"),
+  outcome: "failed",
+  stack: null,
+  reason: "local-command-failed",
+};
+
+/** A connected stack whose `status` answers come from `statuses`, in turn, and whose update fails. */
+function withUnfinishedUpdate(root: string, statuses: unknown[]) {
+  setupConnectedLocalStack(root, statuses[0]);
+  let asked = 0;
+  withLocalCli({
+    run_local_eval: (args: { action: string }) => {
+      if (args.action === "update") return updateFailed;
+      if (args.action !== "status")
+        throw new Error(`unexpected ${args.action}`);
+      asked += 1;
+      return statuses[Math.min(asked, statuses.length) - 1];
+    },
+  });
+}
+
+function localActions() {
+  return invokeCalls
+    .filter((call) => call.command === "run_local_eval")
+    .map((call) => (call.args as { action: string }).action);
+}
+
+/** OpenBot started on the back end's own addresses, said why on the running screen, and waits. */
+async function startedOnKeptRelease(
+  view: Awaited<ReturnType<typeof renderApp>>,
+) {
+  // Information, not a failure: said as a status, with no alert and no setup help beside it.
+  expect((await view.findByRole("status")).textContent).toBe(KEPT_RELEASE);
+  expect(view.queryByRole("alert")).toBeNull();
+  expect(view.queryByRole("link", { name: "Get setup help" })).toBeNull();
+  expect(
+    view.getByRole("heading", { name: "OpenBot is running" }),
+  ).toBeTruthy();
+  expect(
+    view.queryByText("The back end is running but not healthy."),
+  ).toBeNull();
+  expect(
+    view.queryByRole("heading", { name: "OpenBot is stopped" }),
+  ).toBeNull();
+  expect(getStartStackPayload()).toMatchObject({
+    apiUrl: "http://localhost:18082",
+    gatewayWsUrl: "ws://localhost:14401",
+  });
+  // The person reads the notice, then opens OpenBot on the release it has.
+  expect(invokeCalls.some((call) => call.command === "show_openbot")).toBe(
+    false,
+  );
+  await userEvent.click(view.getByRole("button", { name: "Show OpenBot" }));
+  await waitFor(() =>
+    expect(invokeCalls.some((call) => call.command === "show_openbot")).toBe(
+      true,
+    ),
+  );
+}
+
+/**
+ * Found on 0.3.3 on a slow connection. Start began updating the back end from 0.16.0-rc.5 to
+ * 0.16.0-rc.9; the CLI stopped downloading one image at its own limit and kept the update on
+ * record. Nothing in the cluster had changed and every check passed, but the CLI said `degraded`,
+ * and the window said "The back end is running but not healthy." and stopped OpenBot.
+ */
+test("an update that did not finish opens OpenBot on the release the back end runs, and says so", async () => {
+  const after = pinnedCli.updateDidNotFinish;
+  // The same stack before the update: ready on rc.5, with rc.9 to install.
+  const before = {
+    ...after,
+    readiness: "ready",
+    stack: {
+      ...after.stack,
+      step: "ready",
+      hasFailedStep: false,
+      updateInProgress: false,
+      unfinishedUpdate: null,
+    },
+  };
+  withUnfinishedUpdate("/tmp/local-eval-update-did-not-finish", [
+    before,
+    after,
+  ]);
+  const view = await renderApp();
+  await startedOnKeptRelease(view);
+  expect(localActions()).toEqual(["status", "update", "status"]);
+});
+
+test("the next Start tries the update again on a back end that is still running", async () => {
+  withUnfinishedUpdate("/tmp/local-eval-update-again-running", [
+    pinnedCli.updateDidNotFinish,
+  ]);
+  const view = await renderApp();
+  await startedOnKeptRelease(view);
+  expect(localActions()).toEqual(["status", "update", "status"]);
+});
+
+/**
+ * Quit stops the back end. With the update on record, the CLI refuses `local start`
+ * (`update_recovery_required`) and names `local update`, which starts the stack itself.
+ */
+test("the next Start after Quit tries the update again, and never asks the CLI to start", async () => {
+  withUnfinishedUpdate("/tmp/local-eval-update-again-stopped", [
+    pinnedCli.stoppedByQuit,
+    pinnedCli.updateDidNotFinish,
+  ]);
+  const view = await renderApp();
+  await startedOnKeptRelease(view);
+  expect(localActions()).toEqual(["status", "update", "status"]);
+});
+
+test("a back end whose check fails is still not healthy, with an update on record or not", async () => {
+  withUnfinishedUpdate("/tmp/local-eval-update-check-fails", [
+    pinnedCli.apiCheckFails,
+  ]);
+  const view = await renderApp();
+  await view.findByText("The back end is running but not healthy.");
+  expect(
+    view.getByRole("heading", { name: "OpenBot is stopped" }),
+  ).toBeTruthy();
+  expect(view.getByRole("button", { name: "Retry" })).toBeTruthy();
+  expect(view.queryByText(KEPT_RELEASE)).toBeNull();
+  expect(localActions()).toEqual(["status"]);
+  expect(invokeCalls.some((call) => call.command === "start_stack")).toBe(
+    false,
+  );
 });
 
 test("relaunch waits for Start when auto-start is off, interrupted, or the stack is not connected", async () => {

@@ -27,9 +27,10 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
-import { desktopShell } from "@/lib/desktop/shell";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
+import { desktopShell } from "@/lib/desktop/shell";
+import { managePaths } from "@/lib/manage-paths";
 import { mayOpenSetup, setupChecklistQueryOptions } from "@/lib/setup/queries";
 
 const appLinkOptions = { to: "/" } satisfies LinkOptions;
@@ -133,7 +134,7 @@ const PERSONAL_SETTINGS_SIDEBAR_ITEMS: SettingsSidebarItem[] = [
     linkOptions: { to: "/settings/computer" },
   },
   {
-    title: "Activity",
+    title: managePaths("personal").auditLabel,
     icon: IconHistory,
     linkOptions: { to: "/settings/activity" },
   },
@@ -142,13 +143,10 @@ const PERSONAL_SETTINGS_SIDEBAR_ITEMS: SettingsSidebarItem[] = [
 export function settingsSidebarItems(
   edition: "team" | "personal",
 ): SettingsSidebarItem[] {
-  // Learning is who else's Bots use your Skills, and the personal edition has nobody else.
   // Passwords is called Saved logins there, as on Connections.
   return edition === "personal"
     ? [
-        ...SETTINGS_SIDEBAR_ITEMS.filter(
-          (item) => item.title !== "Learning",
-        ).map((item) =>
+        ...SETTINGS_SIDEBAR_ITEMS.map((item) =>
           item.title === "Passwords"
             ? { ...item, title: "Saved logins" }
             : item,

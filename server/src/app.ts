@@ -767,6 +767,12 @@ export function createApp(
           ? await onboardingStore.status(context.var.actor.id)
           : null,
       },
+      /*
+       * The OpenBot release this server runs, drawn small under the person's name. Here rather than
+       * on /api/capabilities, which anybody can read: as with /release, the exact version is not
+       * handed to whoever can reach the port. Null when the build has none, such as in development.
+       */
+      version: config.version ?? null,
     }),
   );
   app.route("/api/me/profile", createProfileRoutes(requireUser, profileStore));
@@ -967,7 +973,7 @@ export function createApp(
       }
       /*
        * The export answers the same filtered query as the list — `eventType`,
-       * `actorUserId`, `initiatorKind`, `targetType`, `targetId`, `from`, `to` — so the
+       * `actorUserId`, `initiatorKind`, `targetType`, `targetId`, `bot`, `from`, `to` — so the
        * downloaded file and the table agree. Paging (`cursor`, `limit`) belongs to the
        * JSON list and is ignored here; the export walks every matching page up to the
        * cap in `readAuditExportRows` and names the file after the day it was pulled.

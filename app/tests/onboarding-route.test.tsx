@@ -25,11 +25,13 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SELF_HOST_URL } from "@/components/layout/self-host-banner";
 import { queryClient } from "@/query-client";
 import type { RouterContext } from "@/router-context";
 import { Route as OnboardingRoute } from "@/routes/_authed/onboarding";
 import { settleReactWork } from "./settle-react-work";
+
+/** Book a call opens the OpenBot for Business page, with its booking calendar, never CopilotKit's generic one. */
+const OPENBOT_FOR_BUSINESS = "https://open.bot/business";
 
 /**
  * Where somebody is in onboarding lives in the address: `?step=<id>`. A reload stays on the step,
@@ -386,6 +388,12 @@ test("Welcome asks to set up permissions, with Ask before making changes beside 
   expect(
     view.getByText("Turn this on to review changes before a Bot makes them."),
   ).toBeTruthy();
+  // What always waits is said for what it covers: a Bot's own computer is its scratch space.
+  expect(
+    view.getByText(
+      "Paying, changing account security, and deleting, sending, sharing or posting in your apps and on websites always wait for you. A Bot's own computer is its scratch space. You can change this later in Settings.",
+    ),
+  ).toBeTruthy();
   const ask = await view.findByRole("switch", {
     name: "Ask before making changes",
   });
@@ -602,7 +610,9 @@ test("somebody trying OpenBot alone gets Talk to us before the name, and Book a 
     expect(footerButtons(view)).toEqual(["Back", "Book a call", "Not now"]);
 
     fireEvent.click(view.getByRole("button", { name: "Book a call" }));
-    expect(opened).toEqual([[SELF_HOST_URL, "_blank", "noopener,noreferrer"]]);
+    expect(opened).toEqual([
+      [OPENBOT_FOR_BUSINESS, "_blank", "noopener,noreferrer"],
+    ]);
     expect(await heading(view, "What should we call you?")).toBeTruthy();
     expect(completed).toBe(false);
   });
@@ -753,7 +763,9 @@ test("somebody trying OpenBot alone whose name is known books a call in a new ta
 
     fireEvent.click(await ready(view, "Book a call"));
 
-    expect(opened).toEqual([[SELF_HOST_URL, "_blank", "noopener,noreferrer"]]);
+    expect(opened).toEqual([
+      [OPENBOT_FOR_BUSINESS, "_blank", "noopener,noreferrer"],
+    ]);
     await waitFor(() => expect(completed).toBe(true));
     await waitFor(() => expect(view.getByText("Home")).toBeTruthy(), {
       timeout: 3000,

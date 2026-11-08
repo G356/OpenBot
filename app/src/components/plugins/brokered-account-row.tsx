@@ -722,18 +722,24 @@ function accountSentence(input: {
   disconnectedDescription: string;
   disconnectedReassurance: string | undefined;
   provider: PluginsProvider;
+  /** What OpenBot itself is called on this screen (`managePaths().deploymentName`). */
+  deployment: string;
+  /** Who reads the row: see {@link brokeredKeyMissing}. */
+  reader: "admin" | "person";
 }): string {
   const {
     account,
     connectedDescription,
+    deployment,
     disconnectedDescription,
     disconnectedReassurance,
     provider,
+    reader,
     title,
   } = input;
 
   if (!account.configured) {
-    return brokeredKeyMissing(provider);
+    return brokeredKeyMissing(provider, deployment, reader);
   }
 
   if (account.kind === "no-auth") {
@@ -852,13 +858,22 @@ function accountSentence(input: {
 export function BrokeredAccountRow({
   account,
   connectedDescription,
+  deployment = "this deployment",
   disconnectedDescription,
   disconnectedReassurance,
   heading,
   notice,
   provider,
+  reader = "admin",
   title,
 }: {
+  /** What OpenBot itself is called on this screen (`managePaths().deploymentName`). */
+  deployment?: string;
+  /**
+   * Who reads the row. A person's own Connections page passes `person`, so a missing broker key is
+   * said without the variable an admin sets.
+   */
+  reader?: "admin" | "person";
   account: BrokeredAccount;
   /** What being connected means on this screen, said beside the button rather than after it. */
   connectedDescription: string;
@@ -940,9 +955,11 @@ export function BrokeredAccountRow({
             {accountSentence({
               account,
               connectedDescription,
+              deployment,
               disconnectedDescription,
               disconnectedReassurance,
               provider,
+              reader,
               title,
             })}
           </ItemDescription>

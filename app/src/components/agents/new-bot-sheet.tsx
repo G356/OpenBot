@@ -1,4 +1,8 @@
-import { summaryFor, WEB_HARNESSES } from "@openbot/shared/harnesses";
+import {
+  OPENBOT_HARNESS_NAME,
+  summaryFor,
+  WEB_HARNESSES,
+} from "@openbot/shared/harnesses";
 import {
   IconCheck,
   IconInfoCircle,
@@ -6,7 +10,11 @@ import {
   IconPlugConnected,
   IconUsers,
 } from "@tabler/icons-react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  type UseQueryResult,
+  useMutation,
+  useQuery,
+} from "@tanstack/react-query";
 import { MotionConfig, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { HarnessMark } from "@/components/agents/harness-mark";
@@ -61,7 +69,11 @@ import {
 import { isComposing } from "@/lib/composing";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import { myCapabilitiesQueryOptions } from "@/lib/enterprise/queries";
-import { pluginKeys } from "@/lib/plugins/queries";
+import {
+  type PluginsPage,
+  pluginKeys,
+  pluginsPageQueryOptions,
+} from "@/lib/plugins/queries";
 import { cn } from "@/lib/utils";
 import { queryClient } from "@/query-client";
 
@@ -136,7 +148,7 @@ function frameworkName(runtime: Runtime): string {
  * cannot know what is behind its address.
  */
 function poweredBy(runtime: Runtime): string {
-  if (runtime.kind === "builtin") return "Powered by OpenBot";
+  if (runtime.kind === "builtin") return `Powered by ${OPENBOT_HARNESS_NAME}`;
   if (runtime.harness === "byo-url") return "";
   const framework = WEB_HARNESSES.find(
     (harness) => harness.id === runtime.harness,
@@ -214,6 +226,16 @@ function NewBotFlow({ onCreated }: { onCreated: (agentId: string) => void }) {
    * somebody finds the Bot page. Kept as what was UNticked so an app that loads late arrives ticked.
    */
   const giveable = useQuery(giveableAppsQueryOptions()).data ?? [];
+  /*
+   * In the personal edition there is nothing to pick: every Bot gets every tool of every app that is
+   * turned on, at its first run (`withPersonalDefaults` in server/src/plugins/personal-defaults.ts),
+   * and one Bot can't be left out of one. So the sheet lists every app that is turned on, the same
+   * list Connections shows as on, and not only the ones this person could give.
+   */
+  const turnedOn = useQuery({
+    ...pluginsPageQueryOptions(),
+    enabled: personal,
+  });
   const [leftOut, setLeftOut] = useState<Set<string>>(() => new Set());
   const reduceMotion = useReducedMotion();
 
@@ -266,8 +288,8 @@ function NewBotFlow({ onCreated }: { onCreated: (agentId: string) => void }) {
 
   const create = async (chosen: Runtime) => {
     const managed = chosen.kind === "managed";
-    const agent = await createAgent.mutateAsync(
-      agentInputFrom({
+    const agent = await createAgent.mutateAsync({
+      ...agentInputFrom({
         name: name.trim(),
         title: poweredBy(chosen),
         roleDescription:
@@ -280,7 +302,12 @@ function NewBotFlow({ onCreated }: { onCreated: (agentId: string) => void }) {
         isolated:
           !personal && isolated && isolationAvailable && isolationAllowed,
       }),
-    );
+      // The framework picked from the list, so the Bot is told what runs it. None for an agent
+      // somebody already runs, since nobody said what is behind its address.
+      ...(managed && chosen.harness !== "byo-url"
+        ? { harness: chosen.harness }
+        : {}),
+    });
     /*
      * The ticked apps, given once the Bot exists. A refusal is not a failed create: the Bot is made,
      * and its page lists every app it could be given with a switch each. So each is tried, none
@@ -399,6 +426,7 @@ function NewBotFlow({ onCreated }: { onCreated: (agentId: string) => void }) {
                 <AboutStep
                   personal={personal}
                   apps={giveable}
+                  turnedOn={turnedOn}
                   instructions={instructions}
                   leftOut={leftOut}
                   name={name}
@@ -615,11 +643,13 @@ const VISIBILITY_OPTIONS: Array<{
  * Shared details for both hosting paths. Name is required; instructions are optional.
  * Visibility sits alongside the name because it does not need a separate screen.
  * Connected apps are selected initially and only shown when some can be granted.
+ * In the personal edition the apps are listed, not picked: see {@link EveryAppList}.
  * These choices stay in the parent flow while navigating between screens.
  */
 function AboutStep({
   personal,
   apps,
+  turnedOn,
   leftOut,
   onApp,
   isolation,
@@ -639,6 +669,7 @@ function AboutStep({
   onInstructions: (value: string) => void;
   onVisibility: (value: Visibility) => void;
   apps: GiveableApp[];
+  turnedOn: UseQueryResult<PluginsPage>;
   leftOut: Set<string>;
   onApp: (app: string, used: boolean) => void;
   isolation: IsolationChoice;
@@ -718,7 +749,9 @@ function AboutStep({
           <IsolatedOption isPublic={visibility === "public"} {...isolation} />
         </>
       )}
-      {apps.length > 0 ? (
+      {personal ? (
+        <EveryAppList turnedOn={turnedOn} />
+      ) : apps.length > 0 ? (
         <FieldSet>
           <FieldLegend variant="label">Apps it can use</FieldLegend>
           <FieldDescription>
@@ -748,6 +781,44 @@ function AboutStep({
         </FieldSet>
       ) : null}
     </FieldGroup>
+  );
+}
+
+/**
+ * The personal edition's apps: every app that is turned on, by name, with nothing to tick. A new Bot
+ * gets all of them, as every Bot has, and turning one off in Connections takes it from every Bot
+ * (`EVERY_BOT_REFUSAL` in server/src/plugins/personal-defaults.ts). A box to untick would promise a
+ * choice the server doesn't offer.
+ */
+function EveryAppList({ turnedOn }: { turnedOn: UseQueryResult<PluginsPage> }) {
+  if (turnedOn.isPending) return null;
+  const servers = turnedOn.data?.servers ?? [];
+  return (
+    <FieldSet>
+      <FieldLegend variant="label">Apps it can use</FieldLegend>
+      <FieldDescription>
+        Every Bot can use every app you turn on in Connections.
+      </FieldDescription>
+      {turnedOn.error ? (
+        <p className="text-destructive text-sm" role="alert">
+          Couldn't load your apps.
+        </p>
+      ) : servers.length > 0 ? (
+        <ul aria-label="Apps it can use" className="grid gap-2 sm:grid-cols-2">
+          {servers.map((server) => (
+            <li
+              className="flex items-center gap-3 rounded-lg bg-muted/50 p-3 text-sm"
+              key={server.id}
+            >
+              <PluginLogo logo={server.logo} />
+              <span className="min-w-0 truncate font-medium">
+                {server.title}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </FieldSet>
   );
 }
 

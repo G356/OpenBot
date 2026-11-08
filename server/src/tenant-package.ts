@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HARNESSES, type Harness } from "@openbot/shared/harnesses";
+import {
+  HARNESSES,
+  type Harness,
+  OPENBOT_HARNESS_NAME,
+} from "@openbot/shared/harnesses";
 import { isPersonBrowserId } from "@openbot/shared/openbot-browser";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import { parse } from "yaml";
@@ -853,6 +857,52 @@ function catalogueNamesOf(harness: Harness): string[] {
   return [harness.name, ...(EARLIER_HARNESS_NAMES[harness.id] ?? [])];
 }
 
+/**
+ * "Powered by <framework>" for any framework the installer can run, longest name first so that
+ * "LangChain (LangGraph)" is read whole rather than as "LangChain" followed by text.
+ */
+const POWERED_BY = new RegExp(
+  `Powered by (?:${HARNESSES.filter(({ image }) => image !== null)
+    .flatMap(catalogueNamesOf)
+    .sort((a, b) => b.length - a.length)
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})(?![\\w])`,
+);
+
+/**
+ * A subtitle with its "Powered by" part following the harness the installer runs now.
+ *
+ * Only that part changes, so a subtitle the person wrote around it keeps their words. When what runs
+ * the Bot now is not a framework the installer knows by name, the claim is dropped rather than kept
+ * untrue, unless it is all the subtitle says.
+ */
+function attributionFollowing(title: string, harness: Harness | undefined) {
+  if (!POWERED_BY.test(title)) return title;
+  if (harness) return title.replace(POWERED_BY, `Powered by ${harness.name}`);
+  const rest = title
+    .replace(new RegExp(`\\s*${POWERED_BY.source}\\.?`), "")
+    .trim();
+  return rest || title;
+}
+
+/**
+ * A Bot's stored configuration as an object. Earlier desktops stored some as a JSON string, which
+ * the queries above read the same way.
+ */
+function storedConfiguration(value: unknown): Record<string, unknown> | null {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
+}
+
 function personalStarterSeed(
   tenantPackage: LoadedTenantPackage,
   fresh: boolean,
@@ -872,26 +922,35 @@ function personalStarterSeed(
       );
     // Starter copy is ordinary editable profile text, written only on the first seed.
     // A Bot that runs here is powered by OpenBot itself, as examples/personal/agents.yaml says.
-    const harnessName = picked ? (harness ? harness.name : null) : "OpenBot";
+    const harnessName = picked
+      ? harness
+        ? harness.name
+        : null
+      : OPENBOT_HARNESS_NAME;
     const title = harnessName
       ? `Everyday life. Powered by ${harnessName}.`
       : "Everyday life.";
+    /*
+     * What it does is the package's `role_description`, the sentence written for the person, and
+     * what a conversation's header shows. Its instructions are the package's `system_prompt`,
+     * written for the model, and they stay where the Bot reads them: the prompt a Bot that runs here
+     * runs on, or the instructions a harness is sent in its standing role.
+     */
     agents.unshift(
       picked
         ? {
             ...fallback,
-            roleDescription: String(fallback.configuration.systemPrompt),
             title,
             id: picked.id,
             type: picked.type,
             configuration: {
               ...picked.configuration,
+              standingInstructions: String(fallback.configuration.systemPrompt),
               personalStarter: true,
             },
           }
         : {
             ...fallback,
-            roleDescription: String(fallback.configuration.systemPrompt),
             title,
             configuration: { ...fallback.configuration, personalStarter: true },
           },
@@ -1066,18 +1125,32 @@ export async function synchronizeTenantPackage(
         ...picked.configuration,
         installerManaged: true,
       });
-      await transaction
+      /*
+       * A starter marked as the person's own connection only because it was renamed.
+       *
+       * Up to this release, saving the starter's Setup page with nothing but a new name or title
+       * stored the installer's address back with a "/" added (`http://agent-harness:4212/`) and
+       * marked the connection as the person's, so a later provider change left it dialling a harness
+       * that no longer ran. That address on the installer's own container, with no key, is the mark
+       * of that save: the container only ever runs the harness the installer picked, so no agent of
+       * the person's can live there, and a person who set a key set something of their own and keeps
+       * it. Such a starter goes back to following the installer.
+       */
+      const renamedOnly = sql`(${stored}->'personalStarter' = 'true'::jsonb
+        and ${stored}->'auth' is null
+        and ${stored}->>'endpoint' ~ '^http://agent-harness:[0-9]+/$')`;
+      const [managed] = await transaction
         .update(agentTable)
         .set({
           type: picked.type,
-          configuration: sql`(${stored} - 'remoteAgentId') || ${connection}::text::jsonb`,
+          configuration: sql`(${stored} - 'remoteAgentId' - 'personalConnection') || ${connection}::text::jsonb`,
           updatedAt: new Date(),
         })
         .where(
           and(
             eq(agentTable.id, PICKED_HARNESS),
             ne(agentTable.type, "built_in"),
-            sql`coalesce(${stored}->>'personalConnection', 'false') <> 'true'`,
+            sql`(coalesce(${stored}->>'personalConnection', 'false') <> 'true' or ${renamedOnly})`,
             sql`(${stored}->'personalStarter' = 'true'::jsonb
               or ${stored}->'installerManaged' = 'true'::jsonb
               or ${stored}->>'endpoint' ~ '^http://agent-harness:[0-9]+([/?]|$)')`,
@@ -1095,7 +1168,92 @@ export async function synchronizeTenantPackage(
                 ),
             ),
           ),
+        )
+        .returning({ id: agentTable.id });
+      /*
+       * And what the subtitle says runs it, for a Bot that now runs on what the installer picked.
+       * The starter is seeded "Everyday life. Powered by Claude Agent SDK.", and a person may have
+       * rewritten the first half; either way it went on naming the harness it was moved off. A
+       * connection the person set themselves is not moved above, so its subtitle is not touched.
+       */
+      if (managed) {
+        const [profile] = await transaction
+          .select({ title: agentProfiles.title })
+          .from(agentProfiles)
+          .where(
+            and(
+              eq(agentProfiles.agentId, PICKED_HARNESS),
+              isNull(agentProfiles.ownerUserId),
+            ),
+          );
+        const title = profile && attributionFollowing(profile.title, selected);
+        if (profile && title !== profile.title) {
+          await transaction
+            .update(agentProfiles)
+            .set({ title })
+            .where(eq(agentProfiles.agentId, PICKED_HARNESS));
+        }
+      }
+    }
+
+    /*
+     * A personal starter seeded before what it does and what it is told were kept apart.
+     *
+     * Those seeds (0.3.2) wrote the package's `system_prompt` as the starter's role description,
+     * so every conversation's header showed the person the instructions written for the model.
+     * Whatever that text says now is what the Bot runs on, since an edit to it moved the Bot's
+     * instructions with it, so it becomes the instructions, and what it does goes back to the
+     * package's own sentence. A starter whose instructions are already apart is left alone, so
+     * this changes a deployment once.
+     */
+    const description = tenantPackage.agents.find(
+      ({ id }) => id === PERSONAL_ASSISTANT,
+    )?.roleDescription;
+    if (bundledPersonal && !freshPersonal && description) {
+      const starters = await transaction
+        .select({
+          id: agentTable.id,
+          type: agentTable.type,
+          configuration: agentTable.configuration,
+          roleDescription: agentProfiles.roleDescription,
+        })
+        .from(agentTable)
+        .innerJoin(agentProfiles, eq(agentTable.id, agentProfiles.agentId))
+        .where(
+          and(
+            eq(agentTable.packageId, deploymentPackage.id),
+            inArray(agentTable.id, [PERSONAL_ASSISTANT, PICKED_HARNESS]),
+            isNull(agentProfiles.ownerUserId),
+          ),
         );
+      for (const starter of starters) {
+        const configuration = storedConfiguration(starter.configuration);
+        if (configuration?.personalStarter !== true) continue;
+        if (starter.roleDescription === description) continue;
+        const together =
+          starter.type === "built_in"
+            ? configuration.systemPrompt === starter.roleDescription
+            : typeof configuration.standingInstructions !== "string" ||
+              configuration.standingInstructions.trim() === "";
+        if (!together) continue;
+        const updatedAt = new Date();
+        if (starter.type !== "built_in") {
+          await transaction
+            .update(agentTable)
+            .set({
+              configuration: {
+                ...configuration,
+                standingInstructions: starter.roleDescription,
+              },
+              updatedAt,
+            })
+            .where(eq(agentTable.id, starter.id));
+        }
+        await transaction
+          .update(agentProfiles)
+          .set({ roleDescription: description, updatedAt })
+          .where(eq(agentProfiles.agentId, starter.id));
+      }
     }
 
     // Disable only explicitly unconfigured agents still owned by this package. Keep canonical

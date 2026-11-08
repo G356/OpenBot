@@ -1,3 +1,4 @@
+import { DESTRUCTIVE_TOOL_NOTE } from "@openbot/shared/bot-prompt";
 import {
   addressedTo,
   SHOW_APP_ACCESS_TOOL,
@@ -328,7 +329,13 @@ export async function grantedTools(options: {
     ref: tool.ref,
     searchable: true as const,
     initiator,
-    description: tool.description,
+    // OpenBot always asks before a tool its app marks destructive, and the Bot is told so here, on
+    // the tool, since its name needn't say it (APPROVAL_GUIDANCE names these words).
+    description: tool.destructive
+      ? [tool.description.trim(), DESTRUCTIVE_TOOL_NOTE]
+          .filter(Boolean)
+          .join("\n\n")
+      : tool.description,
     parameters: parametersFor(tool.inputSchema),
     execute: async (args: unknown) => {
       try {
@@ -405,5 +412,6 @@ export async function grantedSkills(options: {
     title: skill.title,
     summary: skill.summary,
     tools: skill.tools,
+    instructions: skill.instructions,
   }));
 }

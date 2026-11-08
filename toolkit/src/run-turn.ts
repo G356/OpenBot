@@ -55,6 +55,7 @@ import type {
   RunAgentInput,
 } from "@ag-ui/client";
 import { EventType } from "@ag-ui/client";
+import { NOT_RUN_WHILE_WAITING } from "@openbot/shared/approval-outcomes";
 import { NOT_SHOWN } from "@openbot/shared/component-markers";
 import { frameFiring } from "@openbot/shared/routine-firing";
 import type { ApprovalContinuation } from "./continuation";
@@ -68,13 +69,13 @@ import {
 import { sanitizeSeededHistory } from "./history-sanitize";
 import type { AuditInitiator } from "./initiator";
 import { keepLease } from "./lease";
+import { TURN_LIMITS } from "./limits";
+import type { ComponentCatalog, TurnAdmission } from "./ports";
 import {
   observeDetachedRun,
   type StopRecorder,
   stopRecorder,
 } from "./run-stop";
-import { TURN_LIMITS } from "./limits";
-import type { ComponentCatalog, TurnAdmission } from "./ports";
 import { historyOrEmpty } from "./thread-history";
 
 /** Everything a headless turn needs, injectable so tests never dial a model. */
@@ -108,6 +109,13 @@ export type TurnRunner = (input: {
   };
   /** The reply so far, each time more of it arrives, for a surface that shows a turn in progress. */
   onText?: (text: string) => void;
+  /**
+   * The skill the person picked for this turn, by its command, when the host resolved one: a group
+   * turn's message starts with the group's framing, so the `/<command>` the person began with is not
+   * where the server looks for it. Only a slug; the server reads the skill's instructions from its
+   * own store, and only for a skill this Bot holds. See `PICKED_SKILL_PROP`.
+   */
+  skill?: string;
 }) => Promise<{ replyText: string; components?: DrawnComponent[] }>;
 
 /** A display component the Bot drew in a turn and the server allowed, with the props it drew. */
@@ -337,6 +345,7 @@ export function turnMessages(input: {
           toolCallId: continuation.snapshot.toolCallId,
           ...continuation.result,
         },
+        ...notRunBeside(continuation),
       ])
     : seeded.some((message) => message.id === turn.id)
       ? seeded
@@ -349,7 +358,52 @@ export function turnMessages(input: {
   };
 }
 
+/**
+ * An answer for each step asked for beside the one the turn stopped on, which never ran.
+ *
+ * A Bot asks for several steps at once (filling in a form's fields is one breath), and the turn stops
+ * at the first that waits for the person: the browser and the headless runner both run the steps in
+ * order and stop there. The ones after it were never run and nothing will ever answer them. Left
+ * unanswered, the history sanitizer dropped them, so the Bot never learned they had not happened,
+ * and the Claude Agent SDK's Bot, which waits for an answer to every step it asked for before it
+ * goes on, waited for them for ever: the person's decision reached it and it said nothing.
+ *
+ * A step that was answered before the turn stopped keeps its answer; only a step with none gets this.
+ */
+function notRunBeside(
+  continuation: NonNullable<Parameters<TurnRunner>[0]["continuation"]>,
+): Message[] {
+  const { messages, toolCallId } = continuation.snapshot;
+  const asked = messages.find(
+    (message) =>
+      message.role === "assistant" &&
+      message.toolCalls?.some((call) => call.id === toolCallId),
+  );
+  if (asked?.role !== "assistant") return [];
+  const answered = new Set(
+    messages.flatMap((message) =>
+      message.role === "tool" ? [message.toolCallId] : [],
+    ),
+  );
+  return (asked.toolCalls ?? [])
+    .filter((call) => call.id !== toolCallId && !answered.has(call.id))
+    .map((call) => ({
+      id: `${continuation.messageId}:${call.id}`,
+      role: "tool" as const,
+      toolCallId: call.id,
+      content: NOT_RUN_WHILE_WAITING,
+      error: NOT_RUN_WHILE_WAITING,
+    }));
+}
+
 /** The run's input: this run's id, the conversation, the tools it is offered, and any resume. */
+/**
+ * The `forwardedProps` key a headless turn names the skill the person picked under. The server's
+ * runtime reads it (`server/src/plugins/picked-skill.ts`) beside the `/<command>` a browser message
+ * starts with.
+ */
+export const PICKED_SKILL_PROP = "openbotSkill";
+
 export function turnInput(input: {
   threadId: string;
   runId: string;
@@ -357,8 +411,11 @@ export function turnInput(input: {
   state: unknown;
   tools: readonly HeadlessTool[];
   continuation?: Parameters<TurnRunner>[0]["continuation"];
+  skill?: string;
 }): RunAgentInput {
-  const { threadId, runId, messages, state, tools, continuation } = input;
+  const { threadId, runId, messages, state, tools, continuation, skill } =
+    input;
+  const carried = continuation?.snapshot.forwardedProps;
   return {
     threadId,
     runId,
@@ -366,7 +423,13 @@ export function turnInput(input: {
     state,
     tools: tools.filter((tool) => !tool.hidden).map((tool) => tool.definition),
     context: continuation?.snapshot.context ?? [],
-    forwardedProps: continuation?.snapshot.forwardedProps,
+    // An approval's resume carries what the run it continues was sent, the picked skill with it.
+    forwardedProps: skill
+      ? {
+          ...(carried && typeof carried === "object" ? carried : {}),
+          [PICKED_SKILL_PROP]: skill,
+        }
+      : carried,
     ...(continuation
       ? {
           resume: [
@@ -701,6 +764,7 @@ export function createTurnRunner(options: {
       runId: suppliedRunId,
       depth,
       onText,
+      skill,
     } = hostTurn;
     if (signal?.aborted) throw new Error("The headless turn was cancelled.");
     // A paused Bot or a refused capability throws here; a pause mid-turn aborts the returned signal.
@@ -854,6 +918,7 @@ export function createTurnRunner(options: {
       state: agent.state,
       tools: headlessTools,
       ...(continuation ? { continuation } : {}),
+      ...(skill ? { skill } : {}),
     });
 
     let stated = false;

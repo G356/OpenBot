@@ -142,7 +142,7 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
         ? `${person} · ${nameFor(computer.botId)}`
         : `${person}'s computer`;
     }
-    return nameFor(computer.botId ?? computer.computer);
+    return computer.botId ? nameFor(computer.botId) : computer.computer;
   };
 
   /** What a row carries, said once before its state. */
@@ -197,6 +197,7 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
 
       <HostFoldersSection
         connected={hostAccess.data?.connected ?? false}
+        desktop={hostAccess.data?.desktop !== false}
         grants={hostAccess.data?.grants ?? []}
         botIds={(agents.data ?? []).map((agent) => agent.id)}
         loading={hostAccess.isPending || agents.isPending}
@@ -205,6 +206,7 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
         onRevoke={(grantId) => revokeGrant.mutate({ grantId })}
         onStop={() => stopHostAccess.mutate()}
         pending={hostAccess.data?.pending ?? []}
+        personal={personal}
         problem={hostProblem}
         requestingBotId={
           requestGrant.isPending
@@ -369,9 +371,9 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
               Update {confirmingUpdate ? titleOf(confirmingUpdate) : ""}?
             </DialogTitle>
             <DialogDescription>
-              It moves to the computer image this deployment now runs. Its files
-              and sign-ins are kept. If it's running, it restarts and stops what
-              it's doing.
+              It moves to the computer image {paths.deploymentName} now runs.
+              Its files and sign-ins are kept. If it's running, it restarts and
+              stops what it's doing.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -406,7 +408,7 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
           <strong>Reset</strong> deletes the Bot's browser profile and signs it
           out of everything. Both show in{" "}
           <Link className="underline" {...paths.audit()}>
-            Activity
+            {paths.auditLabel}
           </Link>
           .
         </p>
@@ -419,7 +421,7 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
           computer runs an older image. It moves the computer to the new one and
           keeps its files and sign-ins. All three show in{" "}
           <Link className="underline" {...paths.audit()}>
-            Audit
+            {paths.auditLabel}
           </Link>
           .
         </p>
@@ -432,6 +434,8 @@ export function ComputersPage({ children }: { children?: ReactNode } = {}) {
 type HostFoldersSectionProps = {
   botIds: string[];
   connected: boolean;
+  /** This OpenBot runs in OpenBot Desktop. Without it no folder can ever be chosen here. */
+  desktop: boolean;
   grants: HostFolderGrant[];
   loading: boolean;
   nameFor: (botId: string) => string;
@@ -439,6 +443,11 @@ type HostFoldersSectionProps = {
   onRevoke: (grantId: string) => void;
   onStop: () => void;
   pending: HostAccessPendingOperation[];
+  /**
+   * The personal edition, where the person reading is the one OpenBot Desktop asks. In the team
+   * edition the desktop's owner may be somebody else, so a waiting request names them instead.
+   */
+  personal: boolean;
   problem: string | null;
   requestingBotId: string | null;
   revokingGrantId: string | null;
@@ -448,6 +457,7 @@ type HostFoldersSectionProps = {
 function HostFoldersSection({
   botIds: knownBotIds,
   connected,
+  desktop,
   grants,
   loading,
   nameFor,
@@ -455,6 +465,7 @@ function HostFoldersSection({
   onRevoke,
   onStop,
   pending,
+  personal,
   problem,
   requestingBotId,
   revokingGrantId,
@@ -465,7 +476,8 @@ function HostFoldersSection({
     new Set([
       ...knownBotIds,
       ...grants.map((grant) => grant.botId),
-      ...pending.map((one) => one.botId),
+      // Stop folder access is addressed to every Bot ("*"), not one: it is no Bot's row.
+      ...pending.map((one) => one.botId).filter((botId) => botId !== ALL_BOTS),
     ]),
   ).sort((left, right) => nameFor(left).localeCompare(nameFor(right)));
 
@@ -483,14 +495,19 @@ function HostFoldersSection({
         </p>
       ) : null}
 
-      {!connected && !loading ? (
+      {desktop && !connected && !loading ? (
         <p className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
           The desktop app is offline. Open it to approve folders or run
           commands.
         </p>
       ) : null}
 
-      {loading ? null : botIds.length === 0 ? (
+      {loading ? null : !desktop ? (
+        <PageEmpty icon={IconDeviceDesktop} title="Needs OpenBot Desktop">
+          This OpenBot isn't running in the desktop app. Use OpenBot Desktop to
+          let Bots read folders on this computer.
+        </PageEmpty>
+      ) : botIds.length === 0 ? (
         <PageEmpty icon={IconBolt} title="No Bots yet">
           Create one, then choose its folders.
         </PageEmpty>
@@ -500,7 +517,7 @@ function HostFoldersSection({
             <StaggerItem index={index} key={botId}>
               <Item size="sm">
                 <ItemContent>
-                  <ItemTitle title={botId}>{nameFor(botId)}</ItemTitle>
+                  <ItemTitle>{nameFor(botId)}</ItemTitle>
                   <ItemDescription>
                     {summaryFor(botId, grants, pending)}
                   </ItemDescription>
@@ -509,6 +526,7 @@ function HostFoldersSection({
                     grants={grants}
                     onRevoke={onRevoke}
                     pending={pending}
+                    personal={personal}
                     revokingGrantId={revokingGrantId}
                   />
                 </ItemContent>
@@ -529,25 +547,27 @@ function HostFoldersSection({
         </PageRows>
       )}
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-muted-foreground text-sm">
-        <p>
-          Folders are read-only. When a Bot needs to write, the desktop app asks
-          you first.
-        </p>
-        <div className="flex items-center gap-3">
-          <Button
-            disabled={!connected || stopping}
-            onClick={onStop}
-            size="sm"
-            variant="outline"
-          >
-            {stopping ? "Stopping…" : "Stop folder access"}
-          </Button>
-          <Link className="underline" {...paths.audit()}>
-            View audit
-          </Link>
+      {desktop ? (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-muted-foreground text-sm">
+          <p>
+            Folders are read-only. When a Bot needs to write, the desktop app
+            asks you first.
+          </p>
+          <div className="flex items-center gap-3">
+            <Button
+              disabled={!connected || stopping}
+              onClick={onStop}
+              size="sm"
+              variant="outline"
+            >
+              {stopping ? "Stopping…" : "Stop folder access"}
+            </Button>
+            <Link className="underline" {...paths.audit()}>
+              Open {paths.auditLabel}
+            </Link>
+          </div>
         </div>
-      </div>
+      ) : null}
     </PageSection>
   );
 }
@@ -557,12 +577,14 @@ function FolderGrantList({
   grants,
   onRevoke,
   pending,
+  personal,
   revokingGrantId,
 }: {
   botId: string;
   grants: HostFolderGrant[];
   onRevoke: (grantId: string) => void;
   pending: HostAccessPendingOperation[];
+  personal: boolean;
   revokingGrantId: string | null;
 }) {
   const botGrants = grants.filter(
@@ -582,7 +604,9 @@ function FolderGrantList({
           <div className="min-w-0">
             <p className="truncate font-medium text-sm">{grant.displayName}</p>
             <p className="text-muted-foreground text-xs">
-              {ownerLabel(grant)} · Read-only
+              {personal
+                ? "Read-only"
+                : `Approved by ${ownerLabel(grant)} · Read-only`}
             </p>
           </div>
           <Button
@@ -600,8 +624,7 @@ function FolderGrantList({
           className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm"
           key={request.operationId}
         >
-          {pendingLabel(request)} from {ownerLabel(request)}
-          {request.displayName ? ` for ${request.displayName}` : ""}.
+          {pendingSentence(request, personal)}
         </div>
       ))}
     </div>
@@ -625,24 +648,51 @@ function summaryFor(
   return parts.length > 0 ? parts.join(" · ") : "No folders approved.";
 }
 
+/** The Bot id Stop folder access is addressed to: every Bot at once. */
+const ALL_BOTS = "*";
+
 function ownerLabel(grant: { ownerName?: string; ownerEmail?: string }) {
   return grant.ownerName ?? grant.ownerEmail ?? "the desktop owner";
 }
 
-function pendingLabel(request: HostAccessPendingOperation) {
+/**
+ * What a folder request still open is waiting on, as a sentence.
+ *
+ * Reading and listing need nobody's answer, so they say only what is happening. A folder, a file
+ * change or a command waits for the person at the computer: in the personal edition that is the
+ * person reading, so it says OpenBot Desktop is asking them, in a window. It used to say "waiting for
+ * approval from the desktop owner" to the desktop's owner, and "Listing files from the desktop owner".
+ */
+function pendingSentence(
+  request: HostAccessPendingOperation,
+  personal: boolean,
+): string {
   switch (request.kind) {
-    case "write_file":
-      return "File change waiting for approval or to finish";
-    case "run_command":
-      return "Command waiting for approval or to finish";
     case "list_files":
-      return "Listing files";
+      return "Listing files.";
     case "read_file":
-      return "Reading a file";
+      return "Reading a file.";
     case "cancel":
     case "stop":
-      return "Stopping folder work";
+      return "Stopping folder work.";
+  }
+  if (personal) {
+    switch (request.kind) {
+      case "write_file":
+        return "A file change is waiting for you. OpenBot Desktop is asking you in a window.";
+      case "run_command":
+        return "A command is waiting for you or still running. OpenBot Desktop asks you in a window.";
+      default:
+        return "Folder access is waiting for you. OpenBot Desktop is asking you in a window.";
+    }
+  }
+  const owner = ownerLabel(request);
+  switch (request.kind) {
+    case "write_file":
+      return `File change waiting for approval from ${owner}, or to finish.`;
+    case "run_command":
+      return `Command waiting for approval from ${owner}, or to finish.`;
     default:
-      return "Folder access waiting for approval";
+      return `Folder access waiting for approval from ${owner}.`;
   }
 }

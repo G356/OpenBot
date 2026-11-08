@@ -23,6 +23,7 @@ import {
 import { ChannelPagination } from "@/components/app-sidebar/channel-pagination";
 import { DeleteConversationDialog } from "@/components/channels/delete-conversation-dialog";
 import { NavigationTarget } from "@/components/edition/team-features-dialog";
+import { OpenBotVersion } from "@/components/layout/openbot-version";
 import { Button } from "@/components/ui/button";
 import {
   ContextMenu,
@@ -42,6 +43,7 @@ import {
   type ChannelSummary,
   channelListQueryOptions,
 } from "@/lib/channels/queries";
+import { useOffersMemory } from "@/lib/deployment/queries";
 import { appConfig } from "@/lib/generated/application-config";
 import { memoriesQueryOptions } from "@/lib/memory";
 import { isNavigationLink, useNavigationItems } from "@/lib/navigation";
@@ -487,7 +489,9 @@ function WorkspaceLinks({
   onNavigate: () => void;
 }) {
   const routines = useQuery(routinesQueryOptions());
-  const memories = useQuery(memoriesQueryOptions());
+  // No Memories row where memory isn't offered (see `offersMemory`).
+  const memory = useOffersMemory();
+  const memories = useQuery({ ...memoriesQueryOptions(), enabled: memory });
   // OpenDots keeps these rows in the chrome's olive ink; the row you are on only gains the tint.
   const row = (section: string) =>
     cn(
@@ -521,17 +525,19 @@ function WorkspaceLinks({
         <span className="min-w-0 flex-1 truncate">Routines</span>
         <Count value={routines.data?.routines.length} />
       </Link>
-      <Link
-        aria-current={current("memories")}
-        className={row("memories")}
-        onClick={onNavigate}
-        params={{ screen: "memories" }}
-        to="/s/$screen"
-      >
-        <IconBook />
-        <span className="min-w-0 flex-1 truncate">Memories</span>
-        <Count value={memories.data?.length} />
-      </Link>
+      {memory ? (
+        <Link
+          aria-current={current("memories")}
+          className={row("memories")}
+          onClick={onNavigate}
+          params={{ screen: "memories" }}
+          to="/s/$screen"
+        >
+          <IconBook />
+          <span className="min-w-0 flex-1 truncate">Memories</span>
+          <Count value={memories.data?.length} />
+        </Link>
+      ) : null}
       {/* OpenBot's own destinations, from the one list every frame reads. */}
       {navigation.map((item) => (
         <NavigationTarget
@@ -578,8 +584,11 @@ function UserRow() {
       >
         {initials}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[12px] text-(--opendots-muted)">
-        {name}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate text-[12px] text-(--opendots-muted)">
+          {name}
+        </span>
+        <OpenBotVersion className="text-[10px] leading-3 text-(--opendots-icon)" />
       </span>
       {signOutOffered ? (
         <IconAction

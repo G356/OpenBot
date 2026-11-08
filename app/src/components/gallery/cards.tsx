@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { GalleryComponent } from "@/lib/copilot/gallery-registry";
 import { Badge, GalleryFrame, type Tone } from "./frame";
+import { GalleryMarkdown } from "./markdown";
 import { byPosition } from "./positions";
 
 const tone = z
@@ -49,7 +50,9 @@ export function RecordCard({
           <div className="contents" key={key}>
             <dt className="truncate text-muted-foreground">{field.label}</dt>
             {/* Field values wrap because truncation can hide the reported data. */}
-            <dd className="min-w-0 break-words">{field.value}</dd>
+            <dd className="min-w-0 break-words">
+              <GalleryMarkdown>{field.value}</GalleryMarkdown>
+            </dd>
           </div>
         ))}
       </dl>
@@ -166,19 +169,18 @@ export function ChecklistCard({
              * Done is the tick and a muted line, never a line through it. A strike reads as deleted,
              * and a list whose every item is finished was drawn as an answer crossed out.
              */}
-            <span className="min-w-0">
-              <span className={item.done ? "text-muted-foreground" : ""}>
+            <div className="min-w-0">
+              <div className={item.done ? "text-muted-foreground" : ""}>
                 <span className="sr-only">
                   {item.done ? "Done: " : "To do: "}
                 </span>
-                {item.text}
-              </span>
-              {item.note ? (
-                <span className="block text-xs text-muted-foreground">
-                  {item.note}
-                </span>
-              ) : null}
-            </span>
+                <GalleryMarkdown>{item.text}</GalleryMarkdown>
+              </div>
+              {/* Inline code in a reply is a fixed text-sm, which stood taller than this smaller line. */}
+              <GalleryMarkdown className="text-xs text-muted-foreground [&_code]:text-xs">
+                {item.note}
+              </GalleryMarkdown>
+            </div>
           </li>
         ))}
       </ul>
@@ -196,28 +198,43 @@ export const NoticeCardProps = z.object({
     .describe("Supporting points, if there are any"),
 });
 
+/**
+ * The words on a notice's badge. The tone picks the badge's colour and is never its text: a notice
+ * drawn with `tone: "positive"` read "positive", a styling value shown to the person. Neutral has no
+ * badge, and so has a tone still arriving while the card draws.
+ */
+function noticeBadge(tone: string | undefined): string | null {
+  switch (tone) {
+    case "positive":
+      return "Good news";
+    case "caution":
+      return "Heads up";
+    case "negative":
+      return "Problem";
+    default:
+      return null;
+  }
+}
+
 export function NoticeCard({
   title,
   body,
   tone: noticeTone,
   points,
 }: Partial<z.infer<typeof NoticeCardProps>>) {
+  const badge = noticeBadge(noticeTone);
   return (
     <GalleryFrame
-      action={
-        noticeTone && noticeTone !== "neutral" ? (
-          <Badge tone={noticeTone}>{noticeTone}</Badge>
-        ) : undefined
-      }
+      action={badge ? <Badge tone={noticeTone}>{badge}</Badge> : undefined}
       title={title}
     >
-      <p className="text-sm">{body}</p>
+      <GalleryMarkdown className="text-sm">{body}</GalleryMarkdown>
       {points?.length ? (
         <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
           {byPosition(points).map(({ item: entry, key }) => (
             <li className="flex gap-2" key={key}>
               <span aria-hidden="true">·</span>
-              <span className="min-w-0">{entry}</span>
+              <GalleryMarkdown className="min-w-0">{entry}</GalleryMarkdown>
             </li>
           ))}
         </ul>
@@ -231,6 +248,8 @@ export const GALLERY: GalleryComponent[] = [
     name: "showRecord",
     title: "Record",
     kind: "card",
+    summary:
+      "Shows one thing and its details, such as an order, a person or a ticket.",
     description:
       "Show one thing and its fields, an order, a person, a ticket. Use instead of describing a record in prose.",
     parameters: RecordCardProps,
@@ -251,6 +270,7 @@ export const GALLERY: GalleryComponent[] = [
     name: "showMetrics",
     title: "Headline figures",
     kind: "card",
+    summary: "Shows up to six headline figures and how each one has changed.",
     description:
       "Show up to six headline figures, each with an optional movement. Use for a summary somebody reads at a glance.",
     parameters: MetricsCardProps,
@@ -279,6 +299,8 @@ export const GALLERY: GalleryComponent[] = [
     name: "showChecklist",
     title: "Checklist",
     kind: "card",
+    summary:
+      "Shows the steps of a piece of work and which ones are done, such as a release plan.",
     description:
       "Show the tasks or steps of a piece of work and which are finished, such as a release plan or an onboarding list. Only for work somebody ticks off. Not for presenting information: findings, options, recommendations or a list of points go in text or a notice. The person cannot tick these here, so do not use it to ask for anything.",
     parameters: ChecklistCardProps,
@@ -297,6 +319,8 @@ export const GALLERY: GalleryComponent[] = [
     name: "showNotice",
     title: "Notice",
     kind: "card",
+    summary:
+      "Shows a headline with a short explanation and a few supporting points.",
     description:
       "Show a headline, a short explanation and optional supporting points. Use instead of writing several paragraphs of prose.",
     parameters: NoticeCardProps,

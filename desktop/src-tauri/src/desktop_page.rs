@@ -2,11 +2,15 @@
 //!
 //! The same facts and actions as the Status window, reached from the app instead: what is running,
 //! how much memory each part takes, Restart and Stop for OpenBot, and Start, Stop and status for
-//! the local Intelligence stack. Also the update banner's offer, close and install. An inline plugin, so each command carries a permission of its own,
+//! the local Intelligence stack. Also the update banner's offer, close and install, and Check for
+//! updates. An inline plugin, so each command carries a permission of its own,
 //! granted at runtime to the exact origin of the OpenBot this app started and to nothing else.
 //!
 //! And narration's speech recognition, on this computer (`speech`): the window's web view has none
 //! that stays on the device, so the page's narration listens through these instead.
+//!
+//! And Open log folder (`open_logs`): the folder of this app's log file, in the system's file
+//! manager. The page never names a path; the shell opens its own log folder and nothing else.
 
 use openbot_desktop_lib::{app_update, local_eval, local_eval_state, speech, stack};
 use tauri::Manager;
@@ -14,19 +18,21 @@ use tauri::Manager;
 pub const PLUGIN: &str = "openbot-desktop";
 
 /// The permissions a page needs for every command here.
-pub const PERMISSIONS: [&str; 12] = [
+pub const PERMISSIONS: [&str; 14] = [
     "openbot-desktop:allow-appearance",
     "openbot-desktop:allow-status",
     "openbot-desktop:allow-restart",
     "openbot-desktop:allow-stop",
     "openbot-desktop:allow-intelligence",
     "openbot-desktop:allow-update-offer",
+    "openbot-desktop:allow-check-update",
     "openbot-desktop:allow-dismiss-update",
     "openbot-desktop:allow-install-update",
     "openbot-desktop:allow-speech-available",
     "openbot-desktop:allow-speech-start",
     "openbot-desktop:allow-speech-stop",
     "openbot-desktop:allow-speech-abort",
+    "openbot-desktop:allow-open-logs",
 ];
 
 /**
@@ -61,14 +67,14 @@ async fn status(
 }
 
 #[tauri::command]
-async fn restart(app: tauri::AppHandle) -> Result<(), String> {
-    crate::restart_openbot(app).await
+pub async fn restart<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    crate::restart_openbot_from(app, crate::AskedFrom::Settings).await
 }
 
 /// Stops everything, as the menu's Stop did. The page asking goes with it; the window shows setup.
 #[tauri::command]
-async fn stop(app: tauri::AppHandle) {
-    crate::stop_openbot_from_status(app);
+pub async fn stop<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    crate::stop_from_menu(app, crate::AskedFrom::Settings);
 }
 
 /// `local status`, `start` or `stop` for the stack recorded for this installation.
@@ -97,6 +103,14 @@ async fn intelligence(
 #[tauri::command]
 async fn update_offer(app: tauri::AppHandle) -> app_update::Status {
     crate::app_update_status(&app)
+}
+
+/// Settings → This computer's Check for updates: the update feed read now, and what it found.
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<app_update::Asked, String> {
+    crate::check_app_update_for_page(app)
+        .await
+        .map_err(|problem| problem.said)
 }
 
 /// The banner's close button: hidden until a newer version than `version` comes out.
@@ -142,6 +156,13 @@ async fn speech_abort(session: u64) {
     speech::control(session, speech::Control::Abort);
 }
 
+/// Settings → This computer's Open log folder: the shell's own log folder, which the page cannot
+/// choose.
+#[tauri::command]
+async fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    crate::open_log_folder_now(&app)
+}
+
 pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new(PLUGIN)
         .invoke_handler(tauri::generate_handler![
@@ -151,12 +172,14 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             stop,
             intelligence,
             update_offer,
+            check_update,
             dismiss_update,
             install_update,
             speech_available,
             speech_start,
             speech_stop,
-            speech_abort
+            speech_abort,
+            open_logs
         ])
         .build()
 }

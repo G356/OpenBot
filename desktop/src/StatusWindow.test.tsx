@@ -57,6 +57,7 @@ function answers(overrides: Partial<Record<string, unknown>> = {}): Invoke {
         readiness: "ready",
         licence: "valid",
         licenceExpiresAt: null,
+        checksPassed: false,
       };
     return null;
   };
@@ -93,7 +94,7 @@ test("each part shows its state and memory, and the back end its CLI readiness",
     "Background jobs",
     "Database",
   ]);
-  expect(rows(intelligence)).toEqual(["Conversations, memory and learning"]);
+  expect(rows(intelligence)).toEqual(["Conversations and learning"]);
   expect(view.container.textContent).not.toMatch(/openbot-desktop-|k3d-/);
   expect(
     invokeCalls.find((call) => call.command === "run_local_eval")?.args,
@@ -121,6 +122,50 @@ test("Restart OpenBot restarts its processes; Stop Intelligence stops only the s
   expect(
     invokeCalls.some((call) => call.command === "stop_openbot_from_status"),
   ).toBe(false);
+});
+
+test("Open log folder asks the desktop app to open its own log folder", async () => {
+  const logFolder = "/Users/someone/Library/Logs/ai.copilotkit.openbot.desktop";
+  invokeHandler = answers({ desktop_status: { ...running, logFolder } });
+  const view = render(<StatusWindow readEveryMs={60_000} />);
+  await userEvent.click(
+    await view.findByRole("button", { name: "Open log folder" }),
+  );
+  // The window asks; the desktop app opens the folder it writes to, never one it is handed.
+  expect(
+    invokeCalls
+      .filter((call) => call.command === "open_log_folder")
+      .map((call) => call.args === undefined),
+  ).toEqual([true]);
+  expect(
+    view.container.querySelector(".status-details")?.textContent,
+  ).toContain(`Logs${logFolder}`);
+});
+
+test("a log folder that couldn't be opened says where to find it", async () => {
+  invokeHandler = async (command) => {
+    if (command === "open_log_folder") throw "no file manager answered";
+    return answers({
+      desktop_status: {
+        ...running,
+        logFolder: "/Users/someone/Library/Logs/x",
+      },
+    })(command);
+  };
+  const view = render(<StatusWindow readEveryMs={60_000} />);
+  await userEvent.click(
+    await view.findByRole("button", { name: "Open log folder" }),
+  );
+  await view.findByText(
+    "Couldn't open the log folder. Find it under Logs below.",
+  );
+});
+
+test("a desktop app without a log offers no Open log folder", async () => {
+  invokeHandler = answers();
+  const view = render(<StatusWindow readEveryMs={60_000} />);
+  await view.findByRole("region", { name: "App" });
+  expect(view.queryByRole("button", { name: "Open log folder" })).toBeNull();
 });
 
 test("diagnostics carry versions, places and memory, and nothing secret", () => {

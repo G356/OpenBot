@@ -39,13 +39,28 @@ with the rest.
 OpenBot Desktop installs the personal edition: it writes `OPENBOT_EDITION=personal` and the settings
 below into its deployment's `.env` on every Start (`desktop/src-tauri/src/env.rs`). It runs
 PostgreSQL, the one computer, the server and the worker, and no supervisor and no bundled Bot
-containers. The Bot picked during setup, if any, joins the Personal Assistant: the `picked-harness`
-row in [`examples/personal/agents.yaml`](../examples/personal/agents.yaml) is dropped while
-`PICKED_HARNESS_URL` is empty, which is how `start.sh` leaves it.
+containers.
 
 The server's container is given the supervisor by name in `docker-compose.yml` unless
 `COMPUTER_SUPERVISOR_CONTAINER_URL` is set, so the desktop sets it empty as well as
 `COMPUTER_SUPERVISOR_URL`.
+
+A new installation starts with one Bot, the Personal Assistant. When a Bot was picked during setup,
+the Personal Assistant runs on what was picked: it takes the `picked-harness` row's id and
+connection, and the Personal Assistant's instructions, skills and conversation, and its subtitle
+says what runs it ("Everyday life. Powered by LangChain (LangGraph)."). With nothing picked, as
+`start.sh` leaves it, `PICKED_HARNESS_URL` is empty, the `picked-harness` row in
+[`examples/personal/agents.yaml`](../examples/personal/agents.yaml) is dropped, and the Personal
+Assistant runs inside the server ("Everyday life. Powered by OpenBot."). Either way it is an
+ordinary Bot: its name, subtitle and instructions can be changed on its Setup page. On OpenBot
+Desktop, after a change of AI provider, Start moves it to the new framework, renamed or not, and
+rewrites the "Powered by" part of its subtitle, keeping any words around it. A connection the person
+set on the Setup page is left alone.
+
+The starter is seeded once, into a new installation only (`personalStarterSeed` in
+`server/src/tenant-package.ts`). An existing installation keeps the Bots it has: where the Personal
+Assistant and the picked Bot are two Bots, they stay two, and neither is rewritten from the package
+on Start. Only the picked Bot's connection still follows the installer.
 
 **Teach a Bot** shows your browser inside the OpenBot window, as hosted OpenBot does: its tabs, its
 address bar and the live page, with the Recorder already in it and Record and Stop in OpenBot. It
@@ -97,19 +112,41 @@ variable to change:
 
 Settings an admin changes in the team edition are fixed here. Values left in the database by a team
 deployment are not read: capability switches, enterprise settings, network policies, team approval
-settings and team rules, and a paused Automatic Learning.
+settings and team rules, and a paused Automatic Learning. Every Bot takes part in Automatic
+Learning: a Bot those settings left out is taken back in at the next start, or its first run.
 
 | | Personal edition |
 | --- | --- |
-| Use Bots, cloud browser, network and computer, custom rules, password manager, apps a Bot uses as you, check-ins | On |
-| Local computer access, Slack and Teams, Team Bots, Isolated Bots | Off |
-| Ask before making changes | Off for anybody who has not chosen otherwise. Paying, deleting, sending, sharing and posting ask anyway. See [Approvals](approvals.md) |
+| Use Bots, cloud browser, network and computer, local computer access (folders, in OpenBot Desktop), custom rules, password manager, apps a Bot uses as you, check-ins | On |
+| Slack and Teams, Team Bots, Isolated Bots | Off |
+| Ask before making changes | Off for anybody who has not chosen otherwise. Paying, and deleting, sending, sharing or posting in your apps and on websites, ask anyway, as does every edit or command in a folder on this computer. A Bot's own computer is its scratch space. See [Approvals](approvals.md) |
 | Stop idle computers | Never: there is one |
 | Check-ins per Bot per day | 24, as in the team edition |
 | SSO, action recording, model and MCP allowlists, skill sharing | Off |
 
 The password manager uses a saved login only after the person picks it in the private sign-in
 form, and taking over the browser is always offered.
+
+### Folders on this computer
+
+In OpenBot Desktop, Settings → Computer → **Folders on this computer** lets a Bot use folders on
+your own machine. Every safeguard the team edition has applies here too:
+
+- You pick each folder in the desktop's own folder picker (**Choose folder** on the Bot's row). A
+  Bot sees only the folders picked for it.
+- A folder is read-only. Before a Bot changes a file or runs a command in it, the desktop app asks
+  you in a dialog of its own. Set **Commands on your computer** in Settings → Approvals to Never to
+  refuse every command.
+- Every folder chosen, every file read or changed and every command is in Activity.
+- Access ends when OpenBot stops, when the desktop app goes offline, or when you press **Revoke** or
+  **Stop folder access**. Nothing is remembered across a restart.
+
+Only the desktop can open a folder. It hands the server a token minted on every Start
+(`OPENBOT_DESKTOP_HOST_TOKEN`), and its folder worker answers the server with it. A personal edition
+started with `scripts/start.sh` has no such token, so the section says it needs OpenBot Desktop and
+offers no picker, and the server refuses a folder request at once (`409`) rather than waiting for a
+desktop that will never answer. See `server/src/host-access/` and
+`desktop/src-tauri/src/desktop_host_access.rs`.
 
 ### Teach a Bot
 
@@ -151,18 +188,34 @@ account are the same decision when one person makes both:
 - **Parallel Search is on from the start**, and can be turned off. See
   [Web search is on from the start](#web-search-is-on-from-the-start).
 
-**In a conversation**, when a Bot needs an app that isn't connected, it shows a card with
-**Connect**: one press turns the app on and opens its sign-in in a new tab, and the conversation
-carries on once it is connected.
+**In a conversation**, when a Bot needs an app that isn't connected, it shows a card. For an app
+you sign in to, **Connect** turns the app on and opens its sign-in in a new tab, and the
+conversation carries on once it is connected. An app with nothing to sign in to, or whose sign-in
+isn't known until it is on, shows **Turn on**, and one that takes a key shows **Set up**, which
+opens its page under Connections. The Bot is told which button the card shows, so it names that one
+(`server/src/plugins/app-access-tool.ts`).
 
 **Bots** lists your Bots and, under **What your Bots know**, Skills and Memory. A Bot's own page has
 four settings: Routines, Memory, **What it can do** (the apps and skills it has, what it asks before
 doing, and its goals) and Setup.
 
-**Settings** holds Saved logins, Keys, Skills for every Bot, Computer and Activity (the audit trail).
+**Settings** holds Saved logins, Keys, Skills for every Bot, Learning, Computer and Activity (the audit trail).
 Where Admin was, **OpenBot for Business** opens a list of what the team edition adds. An old
-`/admin/...` or `/settings/plugins/...` address opens the same page where it is now. There is no Learning page, Sharing, Visibility, Isolated, or Reaching you, which are
+`/admin/...` or `/settings/plugins/...` address opens the same page where it is now. There is no Sharing, Visibility, Isolated, or Reaching you, which are
 all about other people, other computers or Slack and Teams.
+
+**Settings → Learning** is where the skills OpenBot learns from your recordings and conversations
+wait for your review. You approve or reject them yourself, under **Waiting for your review**, and
+**Learn now** starts a run on demand. **Your skills** lists the skills learned from your recordings and conversations,
+and a row opens one to read. A skill from your recordings reaches every Bot. A skill from
+conversations reaches the Bots that share its Learning container, which is every Bot unless one
+has a container of its own. There is no one to share with, so **Ask to share** is not offered here.
+
+**Approve new skills automatically** is on from the start, so you don't have to review each one. It
+approves what OpenBot proposes from your recordings and conversations. It runs when Learning opens,
+every 15 minutes, and when you switch it on. Turn it off in Settings → Learning to review each skill
+yourself. **Your recordings** on Teach a Bot lists what you have recorded, which needs Intelligence
+0.16 with recordings switched on. Recordings can't be deleted from OpenBot.
 
 The server answers `404` for the API behind the team-only screens: people, identity providers,
 enterprise controls (except `/api/admin/enterprise/me`, which any page may ask), the admin learning

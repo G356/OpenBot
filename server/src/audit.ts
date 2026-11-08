@@ -7,7 +7,10 @@ import {
   getTableColumns,
   gt,
   inArray,
+  isNull,
   lt,
+  ne,
+  notInArray,
   or,
   sql,
 } from "drizzle-orm";
@@ -682,6 +685,10 @@ export const auditEventTypes = [
   /* A person opened one of their own learned Skills to every Bot, or closed it again. Target and payload `skill`. */
   "learning.skill_opened",
   "learning.skill_closed",
+  /* A person asked an admin to share a Skill they approved themselves. Target and payload `skill`. */
+  "learning.sharing_requested",
+  /* An admin answered such a request. Target `skill`; payload `skill`, `userId` and `decision`, `approved` or `declined`. */
+  "learning.sharing_decided",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -769,11 +776,29 @@ export type AuditEventQuery = {
    * and a filter that returns only the first quietly hides two thirds of the refusals.
    */
   eventType?: string;
+  /**
+   * Types to leave out, separated by commas: what the personal edition's Activity does not show
+   * (`app/src/lib/audit/outcome.ts`), asked of the server so a page of 50 is 50 rows a person reads.
+   */
+  excludeEventType?: string;
+  /**
+   * Tools whose successful calls to leave out, separated by commas: a call whose change is recorded
+   * on its own row (`CALLS_RECORDED_AS_CHANGES` in `@openbot/shared/activity-rows`). A call that
+   * failed is kept.
+   */
+  excludeCalls?: string;
   actorUserId?: string;
   /** One kind, or several separated by commas, the way `eventType` takes several. */
   initiatorKind?: string;
   targetType?: string;
   targetId?: string;
+  /**
+   * One Bot's rows: what it did (`payload.bot`) and what was done to it (an `agent` target), the
+   * same two the audit page's Bot column reads. Asked of the server, so a Bot's actions older than
+   * the newest page are found too. A folder given to a Bot before its row said `bot` named it as
+   * `botId`, and is that Bot's row too.
+   */
+  bot?: string;
   from?: string;
   to?: string;
 };
@@ -1032,6 +1057,22 @@ function matchesRequested(column: PgColumn, values: string[] | undefined) {
   return inArray(column, [first, ...rest]);
 }
 
+/** Leaves out the successful calls of these tools. Naming nothing leaves out nothing. */
+function notSucceededCall(tools: string[] | undefined) {
+  return tools && tools.length > 0
+    ? or(
+        ne(auditEvents.eventType, "mcp.call_succeeded"),
+        isNull(auditEvents.targetId),
+        notInArray(auditEvents.targetId, tools),
+      )
+    : undefined;
+}
+
+/** The condition a set to leave out puts on a column. Naming nothing leaves out nothing. */
+function notRequested(column: PgColumn, values: string[] | undefined) {
+  return values && values.length > 0 ? notInArray(column, values) : undefined;
+}
+
 export function createAuditReader(database: Database): AuditReader {
   return {
     list: async (query) => {
@@ -1040,6 +1081,11 @@ export function createAuditReader(database: Database): AuditReader {
           auditEvents.eventType,
           requestedValues(query.eventType),
         ),
+        notRequested(
+          auditEvents.eventType,
+          requestedValues(query.excludeEventType),
+        ),
+        notSucceededCall(requestedValues(query.excludeCalls)),
         query.actorUserId
           ? eq(auditEvents.actorUserId, query.actorUserId)
           : undefined,
@@ -1051,6 +1097,27 @@ export function createAuditReader(database: Database): AuditReader {
           ? eq(auditEvents.targetType, query.targetType)
           : undefined,
         query.targetId ? eq(auditEvents.targetId, query.targetId) : undefined,
+        query.bot
+          ? or(
+              eq(sql<string>`${auditEvents.payload} ->> 'bot'`, query.bot),
+              and(
+                eq(auditEvents.targetType, "agent"),
+                eq(auditEvents.targetId, query.bot),
+              ),
+              and(
+                eq(auditEvents.targetType, "host_access"),
+                eq(sql<string>`${auditEvents.payload} ->> 'botId'`, query.bot),
+              ),
+              // A routine is its Bot's, whoever made it.
+              and(
+                eq(auditEvents.targetType, "routine"),
+                eq(
+                  sql<string>`${auditEvents.payload} ->> 'agentId'`,
+                  query.bot,
+                ),
+              ),
+            )
+          : undefined,
         query.from
           ? gt(auditEvents.createdAt, new Date(query.from))
           : undefined,
@@ -1150,10 +1217,13 @@ export function auditQueryFromUrl(url: URL): AuditEventQuery {
     cursor,
     limit,
     eventType: optional("eventType"),
+    excludeEventType: optional("excludeEventType"),
+    excludeCalls: optional("excludeCalls"),
     actorUserId: optional("actorUserId"),
     initiatorKind: optional("initiatorKind"),
     targetType: optional("targetType"),
     targetId: optional("targetId"),
+    bot: optional("bot"),
     from,
     to,
   };

@@ -36,6 +36,7 @@ export function ConversationView({
   commands,
   channelId,
   disabled = false,
+  onSendHeld,
   pending = false,
   autoFocus = false,
   stopped,
@@ -72,6 +73,8 @@ export function ConversationView({
    */
   channelId?: string;
   disabled?: boolean;
+  /** Writing is open and sending waits on the caller; forwarded to the composer. */
+  onSendHeld?: () => void;
   /**
    * A turn is in flight: the Bot has been asked something and has not come back yet.
    *
@@ -114,7 +117,10 @@ export function ConversationView({
    * where Bots are orbs (`useBotLook`); elsewhere the transcript starts at its first message.
    */
   intro?: ReactNode;
-  /** One-time starter tasks, separate from the Bot introduction and its attribution. */
+  /**
+   * One-time starter tasks, separate from the Bot introduction and its attribution. Directly above
+   * the composer, and not drawn while `attached` is out.
+   */
   starterSuggestions?: ReactNode;
   onSubmit: (draft: ComposerDraft) => void | Promise<void>;
   /** Stop the Bot mid-answer; forwarded to turn the send button into a stop button. */
@@ -464,19 +470,25 @@ export function ConversationView({
           working={working}
         />
       </div>
+      {/*
+       * THE TRANSCRIPT'S SIDE INSET IN A NARROW PANE, AND THE SAME 768px COMPOSER IN A WIDE ONE.
+       *
+       * The composer had no inset of its own, so in a pane narrower than its 768px column it ran to
+       * the pane's border, and the starter tasks above it with it, while the transcript kept 16px a
+       * side. Now the column always pads `px-4`, as the transcript's does, and is allowed 2rem more
+       * than `max-w-3xl` to pay for it: from an 800px pane up the composer is 768px wide exactly as
+       * before, and below that it stands 16px off each edge.
+       *
+       * A width, not a breakpoint, on purpose. A viewport breakpoint does not know how much of the
+       * window the sidebar takes, and a container query would need `@container` on an ancestor of
+       * the composer, which is layout containment: it would become the containing block for the @
+       * menu, which is `position: fixed` at the caret (see `DictationSurface`).
+       */}
       <div
-        className="max-w-3xl mx-auto w-full px-0 pb-4 shrink-0"
+        className="mx-auto w-full max-w-[calc(var(--container-3xl)+2rem)] shrink-0 px-4 pb-4"
         data-slot="composer-column"
       >
         {notice}
-        {attached ? (
-          <div
-            className="mx-5 -mb-4 rounded-t-2xl border border-border border-b-0 bg-muted pb-4"
-            data-slot="composer-drawer"
-          >
-            {attached}
-          </div>
-        ) : null}
         {/*
          * Notifications are offered once this person has started a task: a Bot is working for them,
          * so what a notification is for is plain. Read off the transcript, so the conversation a
@@ -485,7 +497,28 @@ export function ConversationView({
         {messages.some((message) => message.role === "user") ? (
           <NotifyPrompt />
         ) : null}
-        {starterSuggestions}
+        {/*
+         * THE DRAWER IS THE LAST THING ABOVE THE COMPOSER, AND THE STARTER TASKS STEP ASIDE FOR IT.
+         *
+         * It is tucked under the composer (`-mb-4`, no bottom border), so anything drawn between the
+         * two lands on its open bottom edge. The starter tasks and the notifications offer used to
+         * sit there, and the question the Bot was waiting on read as cut off behind them.
+         *
+         * The starter tasks give way rather than move above the drawer: while the Bot waits on an
+         * answer they cannot start anything (`channel-chat.tsx` disables them), they look the same
+         * disabled, and in the Desktop's default window the room belongs to the question. They come
+         * back when it is answered or dismissed.
+         */}
+        {attached ? (
+          <div
+            className="mx-5 -mb-4 rounded-t-2xl border border-border border-b-0 bg-muted pb-4"
+            data-slot="composer-drawer"
+          >
+            {attached}
+          </div>
+        ) : (
+          starterSuggestions
+        )}
         <Composer
           modelPicker={modelPicker}
           agents={agents}
@@ -496,6 +529,7 @@ export function ConversationView({
           compact
           voiceCall={voiceCall}
           disabled={disabled}
+          {...(onSendHeld ? { onSendHeld } : {})}
           droppedAttachments={droppedAttachments}
           onQueue={
             queueWhileBusy

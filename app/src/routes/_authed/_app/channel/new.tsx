@@ -11,7 +11,10 @@ import {
   startsGroup,
   toFieldChange,
 } from "@/components/channels/compose-state";
-import type { ComposerDraft } from "@/components/channels/composer";
+import {
+  type ComposerDraft,
+  toAgentOptions,
+} from "@/components/channels/composer";
 import { ModelPicker } from "@/components/channels/composer/model-picker";
 import { ConversationView } from "@/components/channels/conversation-view";
 import { seedMessage } from "@/components/channels/transcript-messages";
@@ -28,14 +31,12 @@ import {
   ComboboxList,
   useComboboxAnchor,
 } from "@/components/ui/combobox";
-import { newConversationAgent } from "@/lib/agents/default-agent";
 import {
   type AgentProfile,
   agentListQueryOptions,
   agentQueryOptions,
 } from "@/lib/agents/queries";
 import { useStartChannel } from "@/lib/channels/start";
-import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import { modelCatalogueQueryOptions } from "@/lib/models/queries";
 import { useDraftModel } from "@/lib/models/run-model";
 import { useSkillCommands } from "@/lib/plugins/skill-commands";
@@ -147,15 +148,16 @@ function NewConversation({ composition }: { composition: string }) {
     retry: false,
   });
   /*
-   * The URL names a recipient up front. Without one, the only Bot there is or the personal
-   * edition's default Bot is picked (`newConversationAgent`); otherwise To: starts empty and open,
-   * since a Bot picked on the person's behalf among several is one they have to notice and remove.
+   * The URL names a recipient up front (a Bot's own Message link). Without one, To: starts empty
+   * with the Bot menu open, in either edition and however many Bots there are: + is a question,
+   * who is this for, and the menu is the answer to pick from. A Bot picked on the person's behalf
+   * was one they had to notice and remove.
+   *
+   * FOUND ON WINDOWS: a message typed with nobody in To: once went nowhere. The open menu says
+   * from the start that a Bot is needed, and Send with nobody picked says "Choose a Bot first."
+   * and opens it again, keeping the message.
    */
-  const { data: capabilities } = useQuery(deploymentCapabilitiesQueryOptions());
-  const chosen =
-    listed ??
-    (fetched?.id === agent ? fetched : undefined) ??
-    (agent ? undefined : newConversationAgent(profiles, capabilities?.edition));
+  const chosen = listed ?? (fetched?.id === agent ? fetched : undefined);
   const needsUrlAgentDetail =
     Boolean(agent) && profiles !== undefined && !listed;
   const waitingForUrlAgent =
@@ -205,9 +207,11 @@ function NewConversation({ composition }: { composition: string }) {
     if (group) {
       setError(null);
       try {
+        // An `@` addresses one Bot, as it does in every later message of the group.
         await startGroup(
           recipients.map((entry) => entry.id),
           draft.text,
+          draft.agentId,
         );
       } catch (caught) {
         setError(
@@ -368,6 +372,12 @@ function NewConversation({ composition }: { composition: string }) {
         }}
       />
       <ConversationView
+        /*
+         * `@` offers the Bots in To:. The conversation does not exist until the first message is
+         * sent, so the people it is with are the ones picked here, and a first message can address
+         * one of them as every later one can.
+         */
+        agents={toAgentOptions(selected)}
         // Choosing a coworker answers the "To:" field, so the message is what remains: the caret
         // lands in the composer the moment a recipient exists, whether picked here or in the URL.
         // Not before: an empty To: keeps the caret, even though the composer below takes words.

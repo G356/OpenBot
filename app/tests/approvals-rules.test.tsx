@@ -163,7 +163,7 @@ test("team rules are locked for members, enforced auto-review is shown as requir
   const view = draw(<ApprovalSettings />);
   await view.findByText("Ask before taking action (team rule)");
   const mine = view.getByRole("combobox", {
-    name: "Behaviour for mcp/gmail/*",
+    name: "Behaviour for Any action on Gmail",
   });
   expect(mine.textContent).toContain("Take action without asking");
   expect(view.getByText("Locked")).toBeTruthy();
@@ -179,7 +179,7 @@ test("team rules are locked for members, enforced auto-review is shown as requir
 test("a member changes a saved rule in place", async () => {
   const view = draw(<ApprovalSettings />);
   const mine = await view.findByRole("combobox", {
-    name: "Behaviour for mcp/gmail/*",
+    name: "Behaviour for Any action on Gmail",
   });
   const user = userEvent.setup({ document });
   await user.click(mine);
@@ -194,7 +194,7 @@ test("a member changes a saved rule in place", async () => {
     }),
   );
   expect(
-    view.queryByRole("combobox", { name: "Behaviour for mcp/drive/share" }),
+    view.queryByRole("combobox", { name: "Behaviour for Share on Drive" }),
   ).toBeNull();
 });
 
@@ -282,11 +282,11 @@ test("two rules for one tool are told apart by the rest of what they match, neve
   };
   const view = draw(<ApprovalSettings />);
   const match = await view.findByText(
-    "write on checkout.a-very-long-shop-name.example",
+    "changes on checkout.a-very-long-shop-name.example",
   );
   expect(match.className).toContain("line-clamp-none");
-  // The tool stays the row's title.
-  expect(view.getAllByText("computer_click")).toHaveLength(2);
+  // The action, in its approval card's words, stays the row's title.
+  expect(view.getAllByText("Click")).toHaveLength(2);
 });
 
 test("with personal rules switched off by the team, they are shown as not applying and none can be added", async () => {
@@ -350,7 +350,7 @@ test("rules for every Bot point to where rules for a single Bot are", async () =
   expect(link.getAttribute("href")).toBe("/bots");
   // A rule naming one Bot lives on that Bot's page, not here.
   expect(
-    view.queryByRole("combobox", { name: "Behaviour for computer_click" }),
+    view.queryByRole("combobox", { name: "Behaviour for Click" }),
   ).toBeNull();
 });
 
@@ -371,7 +371,7 @@ test("a rule naming no Bot this person can open is listed so it can be removed",
   const view = draw(<ApprovalSettings />);
   expect(await view.findByText("Rules for other Bots")).toBeTruthy();
   expect(
-    view.getByRole("combobox", { name: "Behaviour for computer_click" }),
+    view.getByRole("combobox", { name: "Behaviour for Click" }),
   ).toBeTruthy();
 });
 
@@ -480,7 +480,7 @@ test("personal approvals keep the person's controls without team-only explanatio
   expect(view.queryByText(/Team rules are locked/)).toBeNull();
   expect(view.queryByText("Shared Bots")).toBeNull();
   expect(
-    view.getByRole("switch", { name: "Ask before making changes" }),
+    view.getByRole("switch", { name: "Always ask before making changes" }),
   ).toBeTruthy();
   expect(view.getByRole("switch", { name: "Auto-review" })).toBeTruthy();
 });
@@ -491,12 +491,13 @@ test("team approvals still show the shared Bot account controls", async () => {
 });
 
 /*
- * What always asks, said where the switches are, and only what is true: a Bot deleting a file on
- * its own computer is an ordinary change (server/src/approvals/policy.ts, NOT_ACCOUNT_ACTIONS), so
- * the page must not promise that every delete asks.
+ * What always asks, said where the switches are, in the words onboarding uses, and only what is
+ * true: a Bot deleting a file in its own workspace is an ordinary change
+ * (server/src/approvals/policy.ts, NOT_ACCOUNT_ACTIONS), so the page must not promise that every
+ * delete asks. The switch says it adds every change on top.
  */
 test.each(["team", "personal"] as const)(
-  "the %s edition says what always asks, and that a Bot's own computer is its scratch space",
+  "the %s edition says what always asks, and that a Bot's own workspace is left out of it",
   async (edition) => {
     inboxOverride = {
       teamRules: [],
@@ -506,14 +507,55 @@ test.each(["team", "personal"] as const)(
     await view.findByText("Rules for every Bot");
     const said = view.container.textContent ?? "";
     for (const sentence of [
-      "Payments, passwords and security settings are always handed to you.",
-      "Deleting, sending, sharing and posting in your apps and on websites always ask first.",
-      "So does every edit or command in a folder on your own computer.",
-      "A Bot's own computer is its scratch space, so what it does there asks only when your settings or rules say so.",
+      "Bots always ask for your approval before deleting, sending, sharing, or posting content in your apps or on websites.",
+      "They also ask before every edit or command in a folder on your own computer.",
+      "Bots leave payments and account security changes for you to do yourself.",
+      "Bots can create, edit, and delete files in their own workspace without asking, unless your settings or rules say so.",
+      "Require your approval for every change to your apps, websites, and files, including routine edits and updates.",
     ])
       expect(said.replace(/\s+/g, " ")).toContain(sentence);
     expect(said).not.toContain(
-      "Deleting, sending, sharing and posting always ask first.",
+      "Review a Bot's changes to websites, connected apps, and files.",
     );
   },
 );
+
+/*
+ * FOUND IN THE 1.0 RC1 MAC PASS: a rule saved from an approval card's "Always allow here" was
+ * titled by its tool id ("computer_click", "composio-gmail/GMAIL_SEND_EMAIL" over "on
+ * composio-gmail"). It is titled in the words the card used for the same action.
+ */
+test("a saved rule is titled in its approval card's words, never by its tool id", async () => {
+  inboxOverride = {
+    rules: [
+      {
+        id: "click-here",
+        botId: "*",
+        toolRef: "computer_click",
+        effect: "*",
+        scope: "en.wikipedia.org",
+        behaviour: "allow",
+      },
+      {
+        id: "send-mail",
+        botId: "*",
+        toolRef: "composio-gmail/GMAIL_SEND_EMAIL",
+        effect: "*",
+        scope: "composio-gmail",
+        behaviour: "allow",
+      },
+    ],
+    teamRules: [],
+  };
+  const view = draw(<ApprovalSettings />);
+  expect(
+    await view.findByRole("combobox", { name: "Behaviour for Click" }),
+  ).toBeTruthy();
+  expect(view.getByText("Click")).toBeTruthy();
+  expect(view.getByText("on en.wikipedia.org")).toBeTruthy();
+  expect(view.getByText("Send email on Gmail")).toBeTruthy();
+  const text = view.container.textContent ?? "";
+  expect(text).not.toContain("computer_click");
+  expect(text).not.toContain("composio");
+  expect(text).not.toContain("GMAIL_SEND_EMAIL");
+});

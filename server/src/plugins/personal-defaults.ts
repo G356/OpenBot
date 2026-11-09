@@ -164,6 +164,50 @@ export async function ensurePersonalSkills(
 }
 
 /**
+ * At startup, in the personal edition: the skills the person wrote become theirs, if a build before
+ * this stored them as nobody's.
+ *
+ * Settings > Skills saves with `global`, as Admin > Skills does, and the route stored every such
+ * skill as the deployment's, so a Bot's "Your skills" read "No skills yet" beside a Bot that held
+ * one. The route now gives it to the person (`route-groups/skills.ts`); this gives them the ones
+ * written before that.
+ *
+ * Only skills the person installed: `installed_by` is their email, which is what the route records.
+ * A skill OpenBot ships has none, and one the person edited keeps it, so both stay OpenBot's, as an
+ * edit keeps the owner a skill already had. Writes nothing once there are none left, and then an
+ * audit row naming them, started by OpenBot.
+ *
+ * @returns the slugs it gave to the person
+ */
+export async function ensurePersonalSkillsOwned(
+  database: Pick<Database, "update">,
+  person: { id: string; email: string },
+  audit?: AuditStore,
+): Promise<string[]> {
+  if (currentEdition() !== "personal") return [];
+  const owned = await database
+    .update(skills)
+    .set({ ownerUserId: person.id })
+    .where(
+      and(
+        isNull(skills.ownerUserId),
+        eq(skills.origin, "yours"),
+        eq(skills.installedBy, person.email),
+      ),
+    )
+    .returning({ slug: skills.slug });
+  const slugs = owned.map((row) => row.slug).sort();
+  if (slugs.length > 0 && audit)
+    await recordAuditEvent(audit, {
+      eventType: "configuration.changed",
+      targetType: "skill",
+      initiator: DEPLOYMENT_INITIATOR,
+      payload: { change: "skills_owned_personal", skills: slugs },
+    });
+  return slugs;
+}
+
+/**
  * In the personal edition every Bot takes part in Automatic Learning: its conversations go to the
  * Learning container and it uses every Skill learned there and in the person's own space. There is
  * no switch for one Bot there (the Admin screen that has one is the team edition's), so a Bot left
@@ -200,7 +244,7 @@ async function everyBotApps(deps: PersonalDefaultsDeps): Promise<string[]> {
  * At startup, in every edition: add Routines if it isn't added, bring the saved tools of every app
  * whose tools are OpenBot's own code up to date with this build (see `refreshOwnListings`), and give
  * every Bot all of Routines' tools. The ones that change things too, because scheduling is the point;
- * a Bot still asks before each one runs while Ask before acting is on.
+ * a Bot still asks before each one runs while Always ask before making changes is on.
  *
  * Brought up to date before the grants, so a tool this build adds to Routines is given to every Bot
  * at the same start rather than the one after.
@@ -337,8 +381,8 @@ export function startPersonalDefaultApps(
 /**
  * In the personal edition, connecting an app is the whole decision: every Bot gets every tool it
  * lists, the ones that change things too, as an admin grant on the trail. There is one person, so
- * there is nobody to keep an app from, and what stands in front of a write is Ask before acting:
- * Allow once, Always allow here, or Deny, in the conversation. Taking an app from one Bot is
+ * there is nobody to keep an app from, and what stands in front of a write is Always ask before
+ * making changes: Allow once, Always allow here, or Deny, in the conversation. Taking an app from one Bot is
  * refused (see {@link EVERY_BOT_REFUSAL}); turning the app off takes it from all of them.
  *
  * Installed as a wrapper on `refreshTools` because every way an app's tools are learned goes

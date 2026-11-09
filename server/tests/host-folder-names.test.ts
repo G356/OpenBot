@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { approvalWords } from "@openbot/shared/tool-name";
+import { approvalPhrase, approvalWords } from "@openbot/shared/tool-name";
 import { type ApprovalCandidate, targetSubject } from "../src/approvals/types";
 import { createHostAccessBroker } from "../src/host-access/broker";
 import { hostAccessTools } from "../src/host-access/tools";
@@ -49,16 +49,19 @@ async function asked(
   return candidate;
 }
 
-test("the card names the folder an edit or a command is in, never the grant's id", async () => {
+test("the card names the file and the folder an edit is in, and the folder a command runs in, never the grant's id", async () => {
   const edit = await asked("host_write_file", {
     grantId: GRANT,
     path: "notes.txt",
     content: "FOLDER-EDITED-43",
   });
+  // Found on Windows: the card named the folder ("share") and not the file.
+  // In the words its step and its Activity row use, never "write file on notes.txt in folder-test".
   expect(approvalWords(edit)).toEqual({
-    action: "write file",
-    place: "folder-test",
+    action: "save a file",
+    place: "notes.txt in folder-test",
   });
+  expect(approvalPhrase(edit)).toBe("save a file notes.txt in folder-test");
   const command = await asked("host_run_command", {
     grantId: GRANT,
     command: "wc -c notes.txt",
@@ -100,5 +103,14 @@ test("a task waiting on a folder edit says where by the folder's name", () => {
       target: { displayName: "folder-test" },
       handOff: false,
     }),
-  ).toBe("Waiting for your approval: write file on folder-test");
+  ).toBe("Waiting for your approval: save a file in folder-test");
+  expect(
+    waitingLine({
+      kind: "approval",
+      toolRef: "host/write_file",
+      scope: GRANT,
+      target: { displayName: "folder-test", relativePath: "notes.txt" },
+      handOff: false,
+    }),
+  ).toBe("Waiting for your approval: save a file notes.txt in folder-test");
 });

@@ -1,3 +1,4 @@
+import { appsPage } from "../edition";
 /**
  * The Arcade transport's vendor-free half. Imports no vendor package and nothing from
  * `arcade-adapter.ts`: the adapter imports this module, never the reverse (see `./broker`, which
@@ -7,6 +8,7 @@
 import { cutAtCodeUnits } from "../channels/text";
 import { flagOf } from "./broker";
 import { type ListedTool, MAX_RESULT_CHARS, type McpCallResult } from "./mcp";
+import { fitJsonResult } from "./result-fit";
 
 /**
  * Whether listing tools needs somebody's credential. It does not: the listing uses the deployment's
@@ -392,7 +394,7 @@ export async function listTools(connection: {
   const toolkit = toolkitOf(connection.url);
   if (!toolkit) {
     throw new Error(
-      `${connection.url} does not name an Arcade toolkit, so nothing was asked what it offers. The url has to be arcade:// followed by a toolkit name; correct it on the Plugins page.`,
+      `${connection.url} does not name an Arcade toolkit, so nothing was asked what it offers. The url has to be arcade:// followed by a toolkit name; correct it on the ${appsPage()} page.`,
     );
   }
   if (!installed) {
@@ -598,8 +600,8 @@ function arcadeFailure(thrown: unknown): ArcadeFailure | null {
 }
 
 /**
- * The cap every string this module puts in front of a model goes through, as `composio.ts`'s
- * `cap()` does, with the same limit and the same marker.
+ * The cap a failure's sentence goes through, as `composio.ts`'s `cap()` does, with the same limit
+ * and the same marker. A result goes through `fitJsonResult` in `./result-fit`, as Composio's does.
  *
  * A tool result is read by a model AND copied into the audit row, so an unbounded one is somebody
  * else's server deciding how much of our context window to spend and how large a durable record
@@ -709,7 +711,12 @@ export async function callTool(
         `${toolName} ran, but its answer has no JSON form, so there is nothing to show.`,
       );
     }
-    return { ...cap(value), isError: false };
+    // Fitted as `composio.ts` fits its results: a list is cut between its records, and the note
+    // says how to read the rest. See `./result-fit`.
+    return {
+      ...fitJsonResult(answer.output?.value ?? null, value, toolName),
+      isError: false,
+    };
   } catch (thrown) {
     const failure = arcadeFailure(thrown);
     if (failure && isAuthorizationRequired(failure)) {

@@ -11,10 +11,10 @@ import {
 import { cleanup, render } from "@testing-library/react";
 import type { ComponentType } from "react";
 import { agentKeys } from "@/lib/agents/queries";
-import { auditKeys } from "@/lib/audit/queries";
 import { deploymentKeys } from "@/lib/deployment/queries";
 import { Route as AdminAuditRoute } from "@/routes/_authed/admin/audit";
 import { Route as ActivityRoute } from "@/routes/_authed/settings/_personal/activity";
+import { seedAuditPage } from "./seed-audit-page";
 import { settleReactWork } from "./settle-react-work";
 
 /*
@@ -116,7 +116,7 @@ async function renderPage(
     edition,
   });
   for (const [search, events] of Object.entries(audit))
-    queryClient.setQueryData([...auditKeys.all, search], { events });
+    seedAuditPage(queryClient, search, { events });
   queryClient.setQueryData(agentKeys.list(false), [
     { id: BOT, name: "Personal Assistant" },
   ]);
@@ -186,6 +186,8 @@ test("Admin reads the refusal's own sentence, without the marker", async () => {
   expect(drawn(view.container)[0]?.decision).toEqual([
     "Not connected",
     "You have not connected your Gmail account. Connect it and ask again.",
+    // Admin asks the controls about the row: see what-if/why-button.tsx.
+    "Why?",
   ]);
   const decision =
     view.container.querySelector("tbody [data-column=decision]")?.textContent ??

@@ -32,6 +32,7 @@ import {
   readRunAssertion,
 } from "./agents/callback-token";
 import { canUseComputer } from "./agents/computer-access";
+import { isUnattended, runModeOf } from "./agents/run-mode";
 import { wireCoordination } from "./agents/coordination-wiring";
 import { createAgentFetch } from "./agents/endpoint";
 import { createHandoffDesk } from "./agents/handoff";
@@ -64,6 +65,7 @@ import {
 } from "./approvals/questions";
 import { waitForReplyInTranscript } from "./approvals/reply-in-transcript";
 import { createApprovalResumeTick } from "./approvals/resume-sweep";
+import { loadRuleVocabulary } from "./approvals/rule-vocabulary";
 import { createApprovalStore } from "./approvals/store";
 import { ApprovalRefusedError } from "./approvals/types";
 import { createServerApprovalService } from "./approvals/wiring";
@@ -77,6 +79,7 @@ import {
   PERSON_INITIATOR,
   recordAuditEvent,
 } from "./audit";
+import { readAuditVocabulary } from "./audit-ask";
 import { startRetentionSweeps } from "./audit-retention";
 import { createAuth, sessionLifetimeMs } from "./auth";
 import { DEV_ACTOR, initializeDevActorUser } from "./auth/dev-actor";
@@ -218,7 +221,10 @@ import {
 } from "./learning/personal-space";
 import { clearLearningRevisionFallback } from "./learning/runtime";
 import { learningScopes } from "./learning/scopes";
-import { createLearningSettingsStore } from "./learning/settings";
+import {
+  configuredLearningContainer,
+  createLearningSettingsStore,
+} from "./learning/settings";
 import {
   createLearningSharingStore,
   createOpenSkillIndex,
@@ -272,6 +278,7 @@ import {
 import { ensureSingleUserIdentity } from "./plugins/single-user-identity";
 import { createPluginStore } from "./plugins/store";
 import {
+  connectedSystems,
   grantedSkills,
   grantedTools,
   REFUSAL_MARKER,
@@ -347,6 +354,7 @@ import { createUserInstructionsStore } from "./user-instructions";
 import { createUserPreferencesStore } from "./user-preferences";
 import { createVoiceSessionStore } from "./voice/sessions";
 import { createVoiceSummarizer } from "./voice/summary";
+import { readAuditEvent, readWhatIfVocabulary } from "./what-if";
 import { repeatAfterEach } from "./work/loop";
 import { createWorkQueue, type WorkOfferedListener } from "./work/queue";
 
@@ -372,9 +380,13 @@ const prepareProductRunInput = productHeadlessBoundary(productTelemetry);
 const profileStore = createProfileStore(database);
 // Every dispatch point asks this database whether its person paused the Bot. See agents/lifecycle.ts.
 configureBotLifecycle({ database });
+// The environment's container, until the boot check finds this Intelligence has no such container
+// (learning/auto-assign.ts). A name left over from a setup against another Intelligence then gives
+// way to automatic assignment instead of failing every new thread.
+const configuredLearning = configuredLearningContainer(config.learning);
 const learningSettingsStore = createLearningSettingsStore(
   database,
-  config.learning,
+  configuredLearning,
 );
 // Its own client, like the self-host banner's: the constructor opens nothing.
 const learningProbeIntelligence = createIntelligenceClient(
@@ -418,6 +430,7 @@ const learningCredentials = (): LearningContainerCredentials => ({
 });
 const learningAutoAssign = createLearningAutoAssign({
   enabled: config.learningAutoAssign,
+  configured: configuredLearning,
   store: learningSettingsStore,
   probe: (containerId) =>
     probeLearningContainer(learningProbeIntelligence, containerId),
@@ -836,6 +849,40 @@ const chooseSkills = createSkillChooser(
 const reviewActions = createModelCompleter({
   model: runtimeModel,
   resolveApiKey: resolveDeploymentModelKey,
+});
+
+/**
+ * Writes a boundary from an admin's description, and reads it back (computer/policy-translate.ts).
+ * The deployment's own model, with longer to answer than the router: an admin pressed a button and
+ * is waiting for a rule, which is a longer answer than a router's one name, and a reasoning model
+ * spends seconds before it starts.
+ */
+const writeBoundaries = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  // Room for the thinking a current Claude model does before it answers, which counts against it.
+  maxTokens: 16_000,
+});
+
+/**
+ * Reads an admin's question about the audit trail as filters, and reads the filters back
+ * (audit-ask.ts). The deployment's own model, given as long as a boundary's writer for the same
+ * reason: an admin pressed Ask and is waiting.
+ */
+const askTheAuditTrail = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  maxTokens: 16_000,
+});
+
+/** Reads "what would happen if…" as one action (what-if.ts), for an admin who pressed Ask. */
+const readWhatIfQuestions = createModelCompleter({
+  model: runtimeModel,
+  resolveApiKey: resolveDeploymentModelKey,
+  timeoutMs: 45_000,
+  maxTokens: 16_000,
 });
 
 /*
@@ -1930,11 +1977,14 @@ const signRunForActor =
  * Google's sign-in page and asked a person to sign in to an account the deployment had already
  * connected. Naming them lets it say which one it has not been granted instead.
  *
+ * Only the ones whose tools were listed: an app whose sign-in never finished is not connected, and
+ * was being named to every Bot as one an administrator could grant. See `connectedSystems`.
+ *
  * Read per request rather than held, because a connector added a minute ago has to count.
  * Let failures reach buildAgents, which reports the missing guidance once and keeps the run usable.
  */
 const loadVendors = async () =>
-  (await pluginStore.listServers()).map((server) => server.id);
+  connectedSystems(await pluginStore.listServers());
 
 /*
  * How a run's tools are narrowed to the ones it is about.
@@ -2161,8 +2211,10 @@ const actorAgentResolver = createActorAgentResolver({
   loadAgents: loadAgentsForActor,
   model: runtimeModel,
   resolveModelApiKey: resolveRuntimeModelApiKey,
-  pickedModelForActor: (actorId) => (input) =>
-    modelChoices.forRun(actorId, input.threadId),
+  pickedModelForActor: (actorId, initiator) => (input) =>
+    modelChoices.forRun(actorId, input.threadId, {
+      unattended: isUnattended(runModeOf(initiator)),
+    }),
   stallGuard,
   loadToolsForActor: (actorId, initiator) =>
     restrictToolsForRun(
@@ -2175,6 +2227,18 @@ const actorAgentResolver = createActorAgentResolver({
       ),
       checkInScope,
     ),
+  /*
+   * Which apps each Bot can use for this person, by name and connection state, so a Bot holding
+   * Gmail the person connected says so from its first message instead of finding out by searching.
+   */
+  loadAppsForActor: (actorId) => (botId) =>
+    pluginStore.appAccessForBot({
+      userId: actorId,
+      agentId: botId,
+      composioConfigured: Boolean(composio),
+      ...(composio ? { directory: () => composio.broker.listApps() } : {}),
+      sharedAudience: sharedUseStore.admitsPerson,
+    }),
   signRunForActor,
   computerGuidance: config.computer ? computerGuidance : undefined,
   loadVendors,
@@ -2224,6 +2288,10 @@ const copilotRuntime = mountCopilotRuntime(
       void channelStore.signalBusy(input.threadId, input.busy).catch(() => {});
     },
     learningSettings,
+    // The environment's container, or a saved default, that this Intelligence was found not to have.
+    learningContainerForgotten: (containerId) =>
+      configuredLearning.forgotten(containerId) ||
+      learningSettingsStore.isSetAside(containerId),
     personalSkills: {
       containerFor: personalLearningSpaces.containerFor,
       openSkills: () => openSkillIndex.sources(),
@@ -3156,6 +3224,34 @@ const app = createApp(
         }
       : {}),
     learningModel: learningModelEndpoint,
+    boundaryWriter: writeBoundaries,
+    approvalRules: { vocabulary: () => loadRuleVocabulary(database) },
+    auditQuestions: {
+      complete: askTheAuditTrail,
+      vocabulary: () => readAuditVocabulary(database, () => policyStore.get()),
+    },
+    // The stores the live path decides from: the same boundary, controls snapshot, grants and gate.
+    whatIf: {
+      complete: readWhatIfQuestions,
+      vocabulary: () => readWhatIfVocabulary(database),
+      readers: {
+        policy: () => policyStore.get(),
+        enterprise: () => {
+          const controls = enterpriseControls();
+          return controls ? { snapshot: controls.snapshot() } : null;
+        },
+        grant: (ref, botId) => pluginStore.decide("mcp", ref, botId),
+        ...(approvalService.store.policy
+          ? {
+              approvals: {
+                policy: approvalService.store.policy,
+                rules: (owner: string) => approvalService.store.rules(owner),
+              },
+            }
+          : {}),
+      },
+      event: (id) => readAuditEvent(database, id),
+    },
     personalLearning: {
       store: learningSharingStore,
       ...(learningModelEndpoint?.calls
@@ -3174,6 +3270,7 @@ const app = createApp(
       invalidate: () => openSkillIndex.invalidate(),
       sharingAllowed: skillSharingAllowed,
       manage: learningProbeIntelligence.experimental.learning,
+      modelUnavailable: learningModelUnavailable(process.env),
       recordingTitles: recorderExtension.recordingTitles,
       settings: learningSettings,
       scopesFor: async (actor) =>

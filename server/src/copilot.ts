@@ -12,14 +12,15 @@ import {
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import {
-  APPROVAL_GUIDANCE,
-  COMPONENT_GUIDANCE,
   type ComputerGuidance,
   frameworkGuidance,
   modelGuidance,
-  ORCHESTRATION_GUIDANCE,
-  PROVENANCE_GUIDANCE,
+  promptSection,
+  ROLE_SCOPE_GUIDANCE,
+  type RunMode,
+  runModeGuidance,
   todayGuidance,
+  workingGuidance,
 } from "@openbot/shared/bot-prompt";
 import {
   defaultModelFor,
@@ -27,6 +28,8 @@ import {
 } from "@openbot/shared/model-providers";
 import { MODEL_TOOL_LIMIT } from "@openbot/shared/model-tool-limit";
 import { runTimeZone } from "@openbot/shared/person-time-zone";
+import { checklistNotice } from "@openbot/shared/run-notices";
+import { SUBAGENT_TOOL } from "@openbot/shared/subagent";
 import {
   BuiltInAgentWithSaneHistory,
   CloningRemoteAgent,
@@ -35,8 +38,10 @@ import {
   RunBuiltAgent,
   UnavailableAgent,
 } from "@openbot/toolkit/copilotkit/agents";
+import { firingChecklist } from "@openbot/toolkit/copilotkit/firing-checklist";
+import { UNATTENDED_STEPS } from "@openbot/toolkit/copilotkit/last-step";
 import { createIntelligenceThreadLock } from "@openbot/toolkit/copilotkit/thread-lock";
-import type { GrantedTool } from "@openbot/toolkit/granted-tool";
+import type { GrantedTool, ToolExecution } from "@openbot/toolkit/granted-tool";
 import { parametersFor } from "@openbot/toolkit/granted-tool";
 import { HeadlessToolsMiddleware } from "@openbot/toolkit/headless-tools";
 import { sanitizeSeededHistory } from "@openbot/toolkit/history-sanitize";
@@ -66,6 +71,7 @@ import {
   type RefusingProvider,
   sayingProviderRefusals,
 } from "./agents/provider-refusal";
+import { isUnattended, runModeOf } from "./agents/run-mode";
 import {
   OPENBOT_TOOL_LIMIT,
   toolLimitFor,
@@ -96,6 +102,7 @@ import type { AgentFetch, StallGuard } from "./channels/stall-guard";
 import type { DeploymentConfig } from "./config";
 import { observeModelConnection } from "./desktop-connection-failure";
 import { desktopTelemetryProperties } from "./desktop-telemetry";
+import { currentEdition } from "./edition";
 import { observeIntelligenceAuthentication } from "./intelligence-client";
 import { capturePassOrigin } from "./intelligence-gateway-proxy";
 import {
@@ -119,13 +126,18 @@ import { providerName } from "./model-billing";
 import { modelSourceFor, type RunChoice } from "./model-catalogue";
 import { pickedSkillGuidance } from "./plugins/picked-skill";
 import { refFromToolName } from "./plugins/plugin-store/model";
+import { appCallsOfRun, withAppCallsOf } from "./plugins/run-calls";
 import type { SelectableSkill, Selection } from "./plugins/selection";
 import {
   latestUserText,
   SELECTION_FLOOR,
   selectTools,
 } from "./plugins/selection";
-import { grantedToolGuidance, holdsWebSearch } from "./plugins/tools";
+import {
+  type BotApp,
+  grantedToolGuidance,
+  holdsWebSearch,
+} from "./plugins/tools";
 import { corsOrigin } from "./request-trust";
 import type { ProductTelemetry } from "./telemetry/product";
 import { productRuntimeHook } from "./telemetry/product-boundaries";
@@ -297,40 +309,48 @@ export function standingRoleMessage(
     id: `${STANDING_ROLE_ID_PREFIX}${profile.id}`,
     role: "system",
     content: [
-      [
-        `You are ${profile.name}, ${title}${titleEnd} ${selfAddressGuidance(profile.name)}`,
-        ...(framework ? [frameworkGuidance(framework)] : []),
-      ].join(" "),
-      profile.roleDescription,
-      ...(instructions ? [instructions] : []),
-      "This standing role applies in every channel. Treat channel messages as task-specific instructions within it.",
-      /*
-       * Shared by every remote Bot. Its own role describes the work, and OpenBot adds this
-       * guidance to the same message. The compliance Bot that answered a filing question with
-       * thresholds and deadlines and no source was a `remote-ag-ui` agent whose entire prompt was
-       * "Investigate policies, transaction monitoring, and control evidence."
-       */
-      PROVENANCE_GUIDANCE,
-      // When to answer with a component, which a remote Bot is offered through the run's tools.
-      COMPONENT_GUIDANCE,
-      // When to share its work out to subagents, which OpenBot runs for it through the same tools.
-      ORCHESTRATION_GUIDANCE,
-      // And for the same reason, how to read the untrusted-content envelope its tool results carry.
-      UNTRUSTED_GUIDANCE,
-    ].join("\n\n"),
+      ...promptSection(
+        "identity",
+        [
+          `You are ${profile.name}, ${title}${titleEnd} ${selfAddressGuidance(profile.name)}`,
+          ...(framework ? [frameworkGuidance(framework)] : []),
+        ].join(" "),
+      ),
+      ...promptSection(
+        "role",
+        [
+          profile.roleDescription,
+          ...(instructions ? [instructions] : []),
+          ROLE_SCOPE_GUIDANCE,
+        ].join("\n\n"),
+      ),
+    ]
+      .join("\n\n")
+      .concat(BROUGHT_BOT_GUIDANCE),
   };
 }
 
 /**
- * The guidance {@link standingRoleMessage} ends with, which every Bot OpenBot runs itself is given
- * anyway (see {@link builtInAgentConfiguration}): left off a role run here so it is not said twice.
+ * The working rules every brought Bot is sent after its role, the same ones a Bot OpenBot runs is
+ * given (`workingGuidance`): how to work, when to ask, where answers come from, how to answer, when
+ * to use subagents, and what untrusted content is.
+ *
+ * Shared by every remote Bot, whatever runs it. Its own role describes the work, and OpenBot adds
+ * these to the same message, the one every framework reads as its instructions. The compliance Bot
+ * that answered a filing question with thresholds and deadlines and no source was a `remote-ag-ui`
+ * agent whose entire prompt was "Investigate policies, transaction monitoring, and control
+ * evidence." And the Claude Agent SDK harness hands this message to Claude Code as its whole system
+ * prompt (`agent-claude-sdk/src/replay.py`), which replaces Claude Code's own: without the
+ * how-to-work and asking sections a Claude SDK Bot lost "act when you have enough" and "report what
+ * you skipped" along with it.
+ *
+ * Left off a role run on OpenBot's own runner (`onOpenBotRunner`), which is given the built-in
+ * version instead, so it is not said twice.
  */
-const STANDING_GUIDANCE = `\n\n${[
-  PROVENANCE_GUIDANCE,
-  COMPONENT_GUIDANCE,
-  ORCHESTRATION_GUIDANCE,
-  UNTRUSTED_GUIDANCE,
-].join("\n\n")}`;
+const BROUGHT_BOT_GUIDANCE = `\n\n${workingGuidance({
+  brought: true,
+  untrusted: UNTRUSTED_GUIDANCE,
+}).join("\n\n")}`;
 
 /**
  * A Bot as OpenBot's own runner builds it, whatever it runs on elsewhere: what a check-in runs.
@@ -352,8 +372,8 @@ export function onOpenBotRunner(agent: RegisteredAgent): RegisteredAgent {
     id: agent.id,
     name: agent.name,
     type: "built_in",
-    systemPrompt: agent.standingMessage.content.endsWith(STANDING_GUIDANCE)
-      ? agent.standingMessage.content.slice(0, -STANDING_GUIDANCE.length)
+    systemPrompt: agent.standingMessage.content.endsWith(BROUGHT_BOT_GUIDANCE)
+      ? agent.standingMessage.content.slice(0, -BROUGHT_BOT_GUIDANCE.length)
       : agent.standingMessage.content,
   };
 }
@@ -615,8 +635,13 @@ export function standingInstructionsGuidance(
   const trimmed = instructions?.trim() ?? "";
   if (trimmed.length === 0) return null;
 
+  /*
+   * "Their own instructions", not "standing instructions": "standing" also named a brought Bot's
+   * role and a routine, three different things in one prompt. Wrapped in its own section by the
+   * caller.
+   */
   return [
-    `The person you are working with has standing instructions that apply in every channel and every task, alongside your role: ${trimmed}`,
+    `The person you are working with has written instructions of their own, for every conversation and every task, alongside your role: ${trimmed}`,
     "Where the two conflict, the role decides what you do and these decide how you do it.",
   ].join("\n\n");
 }
@@ -677,7 +702,25 @@ export function builtInAgentConfiguration(
    * store (`picked-skill.ts`). Absent when they picked none.
    */
   pickedSkill?: string,
+  /**
+   * The apps this Bot holds, as they stand for this person: connected, needing a connection, and so
+   * on. Absent says nothing about apps. See `grantedToolGuidance`.
+   */
+  apps?: readonly BotApp[],
+  /**
+   * What this run is, beyond its tools. Appended last for the positional reason `buildAgents` gives.
+   *
+   * `mode` says whether anybody is watching (`runModeOf`): a routine or a check-in is told it runs
+   * unattended, and a run told that may take up to `UNATTENDED_STEPS.most` steps rather than chat's
+   * {@link TOOL_STEPS} (which step it answers on is decided per run, from the routine's parts, in
+   * `unattendedLastStep`). One reading, so a run is never told to finish with chat's budget.
+   * `usesComputer` says whether this run was offered a computer tool. Absent means
+   * nobody knows yet (a Bot built before its first request), and the computer guidance goes in
+   * whenever the deployment has a computer, as it always did.
+   */
+  run: { mode?: RunMode; usesComputer?: boolean } = {},
 ): BuiltInAgentConfiguration {
+  const unattended = isUnattended(run.mode);
   if (!apiKey && !planModel) {
     return {
       type: "custom",
@@ -728,63 +771,86 @@ export function builtInAgentConfiguration(
   return {
     model: wrapped ?? planModel ?? `${model.provider}/${model.defaultModel}`,
     /*
-     * The package's role, then the person's own standing instructions, then what this Bot actually
-     * holds, then the computer, then the date.
+     * Tagged sections in a fixed order: who it is, its role, the person's own instructions, the
+     * working rules every Bot gets, what this Bot holds, its computer, its learned skills, then
+     * what this run is (unattended or not), the model and the date, and the picked skill.
      *
-     * The grants go BEFORE the computer prose on purpose. That prose is long and emphatic about the
-     * browser and mentions connectors nowhere, so a Bot that read it last reached for the browser
-     * even when it held a tool for the exact system being asked about.
+     * The grants go BEFORE the computer prose on purpose. That prose is long and about the browser
+     * and mentions connectors nowhere, so a Bot that read it last reached for the browser even when
+     * it held a tool for the exact system being asked about.
      *
-     * The person's instructions go straight after the role and before all of it, because they are
-     * the other half of the same question — who you are and who you are working for — and because
-     * their precedence sentence only means anything next to the role it defers to.
+     * The person's instructions go straight after the role, because they are the other half of the
+     * same question — who you are and who you are working for — and because their precedence
+     * sentence only means anything next to the role it defers to.
+     *
+     * The run mode goes after everything that is the same for every run of this Bot, so a routine's
+     * prompt shares its prefix with a person's chat for a provider's cache.
      */
     prompt: [
       /*
-       * Who it is, first. Left off only where the prompt already says it: a remote Bot run here for
-       * a check-in (`onOpenBotRunner`) carries its standing role, which names it the same way.
+       * Who it is, first. A remote Bot run here for a check-in (`onOpenBotRunner`) carries its
+       * standing role, which is already in sections and names it the same way.
        */
-      ...(agent.systemPrompt.includes(selfAddressGuidance(agent.name))
-        ? []
-        : [identityGuidance(agent.name, agent.title, agent.framework)]),
-      agent.systemPrompt,
-      ...(standing ? [standing] : []),
+      ...(agent.systemPrompt.startsWith("<identity>")
+        ? [agent.systemPrompt]
+        : [
+            ...(agent.systemPrompt.includes(selfAddressGuidance(agent.name))
+              ? []
+              : promptSection(
+                  "identity",
+                  identityGuidance(agent.name, agent.title, agent.framework),
+                )),
+            ...promptSection(
+              "role",
+              `${agent.systemPrompt}\n\n${ROLE_SCOPE_GUIDANCE}`,
+            ),
+          ]),
+      ...promptSection("person_instructions", standing),
       /*
-       * Unconditional, unlike the two below it.
-       *
-       * Those describe things a deployment may or may not have. This describes how to answer at all,
-       * and a Bot with no tools and no computer needs it most: it has nothing to read, so everything
-       * it says comes from its own knowledge, and saying so is the only honest move available.
+       * Unconditional: how to work, when to ask (OpenBot asks before consequential actions, so the
+       * Bot does not ask as well), where answers come from (a Bot with no tools needs that most: all
+       * it says is its own knowledge), when to draw a component, when to use subagents, and how to
+       * read the untrusted-content envelope every outside result arrives in.
        */
-      PROVENANCE_GUIDANCE,
-      // When to answer with a component. Also unconditional: the tools it names vary, the rule not.
-      COMPONENT_GUIDANCE,
-      // When to give work to subagents. Worded for a run that holds the tool, which most do.
-      ORCHESTRATION_GUIDANCE,
-      // OpenBot asks the person before consequential actions, so the Bot does not ask as well.
-      APPROVAL_GUIDANCE,
-      // How to read the untrusted-content envelope every outside result arrives in.
-      UNTRUSTED_GUIDANCE,
-      ...(grantedToolGuidance(tools, connectedVendors, shown)
-        ? [grantedToolGuidance(tools, connectedVendors, shown)]
-        : []),
-      ...(computerGuidance
-        ? [computerGuidance({ search: holdsWebSearch(tools) })]
-        : []),
-      ...(learnedSkills?.catalog ? [learnedSkills.catalog] : []),
+      ...workingGuidance({ untrusted: UNTRUSTED_GUIDANCE }),
+      ...promptSection(
+        "apps",
+        grantedToolGuidance(tools, connectedVendors, shown, apps),
+      ),
       /*
-       * The model it answers on, as the person sees it named. Near the end with the date: it changes
-       * only when the model does, and a new model starts a new cache anyway.
+       * Only for a run that holds the computer. A third of the prompt is about the browser, and a
+       * Linear-and-Notion routine that never opens one read all of it ahead of its own job.
        */
-      ...(model.label ? [modelGuidance(model.label)] : []),
-      // Last, so everything above stays one prefix a provider can cache. See `todayGuidance`.
-      todayGuidance(now, timeZone),
+      ...(computerGuidance && run.usesComputer !== false
+        ? promptSection(
+            "computer",
+            computerGuidance({
+              search: holdsWebSearch(tools),
+              personal: currentEdition() === "personal",
+            }),
+          )
+        : []),
+      ...promptSection("learned_skills", learnedSkills?.catalog),
+      // A routine or a check-in, with nobody watching. Nothing for a person's own turn.
+      ...promptSection("run_mode", runModeGuidance(run.mode ?? "attended")),
+      /*
+       * The model it answers on, as the person sees it named, and the date. Near the end: the model
+       * changes only when the person picks another, and a new model starts a new cache anyway. The
+       * date last, so everything above stays one prefix a provider can cache. See `todayGuidance`.
+       */
+      ...promptSection(
+        "model_and_date",
+        [
+          ...(model.label ? [modelGuidance(model.label)] : []),
+          todayGuidance(now, timeZone),
+        ].join("\n\n"),
+      ),
       /*
        * After the date, because it changes with the message: the skill the person picked for this
        * one. Here, in the prompt this deployment writes, because a system row the browser sent is
        * dropped before the model (`forwardSystemMessages` is never set). See `picked-skill.ts`.
        */
-      ...(pickedSkill ? [pickedSkill] : []),
+      ...promptSection("picked_skill", pickedSkill),
     ].join("\n\n"),
     ...(planModel ? {} : { apiKey: apiKey ?? undefined }),
     // The run's thinking effort, when the person picked one the model takes. A plan's harness is
@@ -826,17 +892,26 @@ export function builtInAgentConfiguration(
               ),
           })),
           // Each search is a step of its own, so a run that searches gets two more.
-          maxSteps: searching ? TOOL_STEPS + SEARCH_STEPS : TOOL_STEPS,
+          maxSteps:
+            (unattended ? UNATTENDED_STEPS.most : TOOL_STEPS) +
+            (searching ? SEARCH_STEPS : 0),
         }
       : {}),
   };
+}
+
+/** One of the computer's own tools, which the surface offers by these names (`computer/schema.ts`). */
+function isComputerTool(tool: { name: string }): boolean {
+  return tool.name.startsWith("computer_");
 }
 
 /**
  * How many turns of the tool loop one run may take.
  *
  * Enough for a Bot to search, read what came back, search again on a better term, and answer.
- * Beyond that a model is not making progress, and every extra step is somebody's money.
+ * Beyond that a model is not making progress, and every extra step is somebody's money. That holds
+ * for chat, where a person is there to say "carry on"; a run nobody is watching gets
+ * `UNATTENDED_STEPS` instead, and either is told when it reaches its last (`answersOnLastStep`).
  */
 const TOOL_STEPS = 8;
 
@@ -920,6 +995,8 @@ export async function buildAgents(
   botNames: ReadonlyMap<string, string> = new Map(
     agents.map((agent) => [agent.id, agent.name]),
   ),
+  /** The apps each Bot holds, as they stand for the person asking. Absent says nothing about apps. */
+  loadApps?: LoadAppsForBot,
 ): Promise<Record<string, AbstractAgent>> {
   let vendors: readonly string[] = [];
   try {
@@ -980,6 +1057,7 @@ export async function buildAgents(
           holdsTools,
           pickedModel,
           botNames,
+          loadApps,
         );
         if (loadPersonalMemory)
           built.use(new PersonalMemoryMiddleware(agent.id, loadPersonalMemory));
@@ -1258,12 +1336,37 @@ async function buildAgent(
   pickedModel?: PickedModel,
   /** Who answered, by Bot id, for another Bot's answer in this one's thread. See {@link buildAgents}. */
   botNames: ReadonlyMap<string, string> = new Map(),
+  /** The apps this Bot holds, as they stand for the person asking. See {@link buildAgents}. */
+  loadApps?: LoadAppsForBot,
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
   }
 
-  const granted = await loadTools(agent.id);
+  // Whether anybody is watching this run: a routine or a check-in is told it runs unattended.
+  const mode = runModeOf(initiator);
+  /*
+   * This run's app calls, a few at a time. A subagent is this Bot built again inside the run's
+   * `run_subagent` call, and takes the run's calls rather than a set of its own (`appCallsOfRun`).
+   */
+  const appCalls = appCallsOfRun();
+  const granted = await withAppCallsOf(appCalls, () => loadTools(agent.id));
+  // Nobody is watching, so the run has to finish on its own: the same reading the prompt is given.
+  const unattended = isUnattended(mode);
+  /*
+   * Best-effort, like the vendors: a failed read leaves the Bot told what its tools say, as before,
+   * and must not stop the run. Never log the thrown value: database errors can carry row contents.
+   */
+  let apps: readonly BotApp[] | undefined;
+  try {
+    apps = await loadApps?.(agent.id);
+  } catch {
+    console.error({
+      error: "bot_app_lookup_failed",
+      context: { operation: "loadApps", agentId: agent.id },
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   /*
    * Whether narrowing can do anything here at all.
@@ -1438,6 +1541,7 @@ async function buildAgent(
         : undefined,
       refusingProvider(model),
       holdsInstructions ? pickedSkillFor : undefined,
+      apps,
     );
   }
 
@@ -1546,6 +1650,16 @@ async function buildAgent(
       undefined,
       timeZone,
       pickedSkill,
+      apps,
+      {
+        mode,
+        /*
+         * Whether this run was offered the computer, known once the request is: the browser offers
+         * the computer tools only to a Bot the person may drive, and a background turn only to one
+         * whose owner's computer it may use. Unknown before the first request.
+         */
+        ...(input ? { usesComputer: input.tools.some(isComputerTool) } : {}),
+      },
     );
     // What really waits: nothing, when the model could not be wrapped and is sent every tool.
     const held = searchesTools(
@@ -1555,6 +1669,7 @@ async function buildAgent(
       : new Set<string>();
     const admit = admitTools(held, runModel);
     return new BuiltInAgentWithSaneHistory(configuration, {
+      ...(unattended ? { unattended } : {}),
       /*
        * A provider's refusal is told in words, naming the provider, rather than as the SDK's text, a
        * "Forbidden" or a retry count. Out of credit keeps its own sentence, from `model-billing.ts`.
@@ -1660,7 +1775,15 @@ async function buildAgent(
        * deployment's own statement rather than anything the model can edit. A request is earlier
        * than a run and knows neither.
        */
-      const passing = (await handoff?.(agent.id, input)) ?? [];
+      const passing = ((await handoff?.(agent.id, input)) ?? []).map((tool) =>
+        tool.name === SUBAGENT_TOOL
+          ? {
+              ...tool,
+              execute: (args: unknown, execution?: ToolExecution) =>
+                withAppCallsOf(appCalls, () => tool.execute(args, execution)),
+            }
+          : tool,
+      );
       signal.throwIfAborted();
       const tools = passing.length > 0 ? [...offered, ...passing] : offered;
       // Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
@@ -1672,6 +1795,8 @@ async function buildAgent(
         passing.length === 0 &&
         pinned.size === 0 &&
         input.tools.length === 0 &&
+        // `whole` carries the computer guidance, and this run holds no computer tool.
+        !computerGuidance &&
         !timeZone &&
         !pickedSkill
         ? whole
@@ -2098,6 +2223,8 @@ function remoteAgentWithStandingRole(
    * See `picked-skill.ts`.
    */
   pickedSkillFor?: (input: RunAgentInput) => string | undefined,
+  /** The apps this Bot holds, as they stand for the person asking. See `grantedToolGuidance`. */
+  apps?: readonly BotApp[],
 ) {
   const holds = (input: RunAgentInput) => !holdsTools || holdsTools(input);
   /*
@@ -2112,11 +2239,22 @@ function remoteAgentWithStandingRole(
    * prompt — a page about the browser that mentions connectors nowhere. That is the Bot that browsed
    * to drive.google.com holding four Drive tools.
    *
-   * Built from the tools this run was offered rather than from everything granted, so a narrowed
-   * run is never told it holds a system it cannot reach on this turn.
+   * Built from the tools this run was offered, so a narrowed run is never told it can call a tool it
+   * was not sent. What it holds and was not offered is counted beside its system as offered on a turn
+   * that needs it: left out, a Bot offered Parallel's feedback tool and not its search told the
+   * person it could not search and that an administrator could grant it.
    */
-  const holdingsMessageFor = (offered: GrantedTool[]) => {
-    const holdings = grantedToolGuidance(offered, connectedVendors);
+  const holdingsMessageFor = (offered: GrantedTool[], held: boolean) => {
+    const sent = new Set(offered.map((tool) => tool.name));
+    // A run the runtime makes for itself holds nothing, now or later. See `isAskedRun`.
+    const notOffered = held ? tools.filter((tool) => !sent.has(tool.name)) : [];
+    const holdings = grantedToolGuidance(
+      [...offered, ...notOffered],
+      connectedVendors,
+      undefined,
+      apps,
+      new Set(notOffered.map((tool) => tool.name)),
+    );
     return holdings
       ? {
           id: `${GRANTED_TOOLS_ID_PREFIX}${agent.id}`,
@@ -2131,7 +2269,7 @@ function remoteAgentWithStandingRole(
     input: RunAgentInput,
     next: AbstractAgent,
   ) => {
-    const holdingsMessage = holdingsMessageFor(tools);
+    const holdingsMessage = holdingsMessageFor(tools, holds(input));
     /*
      * Not signed for a run the runtime makes for itself: the statement is what the Bot hands back to
      * call a tool here, and that run holds none. See `isAskedRun`.
@@ -2289,9 +2427,26 @@ function remoteAgentWithStandingRole(
           ...agent.standingMessage,
           content: [
             agent.standingMessage.content,
-            ...(label ? [modelGuidance(label)] : []),
-            todayGuidance(new Date(), runTimeZone(input.forwardedProps)),
-            ...(pickedSkill ? [pickedSkill] : []),
+            /*
+             * A routine firing on a Bot that runs elsewhere is unattended too, and told so the way
+             * a built-in Bot is. A check-in never reaches here: it runs on OpenBot's own runner.
+             */
+            ...promptSection("run_mode", runModeGuidance(runModeOf(initiator))),
+            /*
+             * A multi-part routine's checklist, worded as a built-in Bot's is (`firingChecklist`).
+             * Here rather than on the firing itself, which a harness can echo back into the
+             * conversation. Only the words: this deployment cannot hold a loop it does not run to
+             * closing it.
+             */
+            ...promptSection("routine_checklist", routineChecklistOf(messages)),
+            ...promptSection(
+              "model_and_date",
+              [
+                ...(label ? [modelGuidance(label)] : []),
+                todayGuidance(new Date(), runTimeZone(input.forwardedProps)),
+              ].join("\n\n"),
+            ),
+            ...promptSection("picked_skill", pickedSkill),
           ].join("\n\n"),
         };
         const prepared: RunAgentInput = {
@@ -2562,6 +2717,8 @@ export async function resolveRuntimeAgents(
    * positional reason `loadInstructions` gives. Absent, every run uses the deployment's model.
    */
   pickedModel?: PickedModel,
+  /** Appended last for the positional reason `loadInstructions` gives. See {@link buildAgents}. */
+  loadApps?: LoadAppsForBot,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -2607,6 +2764,7 @@ export async function resolveRuntimeAgents(
     // Every Bot this person has, not only the one being built: an answer in its thread can be any
     // of theirs.
     new Map(all.map((agent) => [agent.id, agent.name])),
+    loadApps,
   );
 }
 
@@ -2707,6 +2865,12 @@ export function effortProviderOptions(
 
 /** What one Bot may call, for the person whose request this is. */
 export type LoadToolsForBot = (botId: string) => Promise<GrantedTool[]>;
+
+/**
+ * The apps one Bot holds, each as it stands for the person a run is for. Per person for the reason
+ * {@link LoadToolsForBot} is: whether Gmail is connected is that person's fact, not the Bot's.
+ */
+export type LoadAppsForBot = (botId: string) => Promise<readonly BotApp[]>;
 
 /**
  * Writes the row for a run refused before its model call because it would have sent more tools
@@ -2865,6 +3029,8 @@ export function mountCopilotRuntime(
     basePath?: string;
     onRunBusy?: (input: { threadId: string; busy: boolean }) => void;
     learningSettings?: LearningSettingsStore;
+    /** A Learning container found missing on this Intelligence (the environment's, or the saved default). See learning/runtime.ts. */
+    learningContainerForgotten?: (containerId: string) => boolean;
     /**
      * Each person's own Learning space and everyone's opened Skills, which join the Bot's own in every run
      * (learning/runtime.ts). Absent, a run gets only the Bot's own learned Skills.
@@ -2887,6 +3053,7 @@ export function mountCopilotRuntime(
     basePath = "/api/copilotkit",
     onRunBusy,
     learningSettings,
+    learningContainerForgotten,
     personalSkills,
     trajectoryCapture,
   } = options;
@@ -2967,6 +3134,9 @@ export function mountCopilotRuntime(
         store: learningSettings,
         client: intelligenceClient,
         ...(personalSkills ? { people: personalSkills } : {}),
+        ...(learningContainerForgotten
+          ? { forgotten: learningContainerForgotten }
+          : {}),
       })
     : undefined;
 
@@ -3143,4 +3313,10 @@ export function mountCopilotRuntime(
       return read.messages;
     },
   };
+}
+
+/** The checklist a routine's firing in these messages carries, as words, or nothing. */
+function routineChecklistOf(messages: Message[]): string | undefined {
+  const { parts } = firingChecklist(messages);
+  return parts.length > 0 ? checklistNotice(parts) : undefined;
 }

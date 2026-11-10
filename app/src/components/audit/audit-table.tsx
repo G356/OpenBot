@@ -97,21 +97,31 @@ const FACETS = [
 export function AuditTable({
   deploymentName = "this deployment",
   events,
+  footer,
+  moreToLoad = false,
   nameFor,
   query,
+  rowAction,
   storedNames = false,
   toolbar,
 }: {
   /** What OpenBot itself is called in a row it started: "this deployment" in Admin. */
   deploymentName?: string;
   events: AuditEvent[];
+  /** Drawn under the last row, inside the scroll: where older events are asked for. */
+  footer?: React.ReactNode;
+  /** Whether the server has older events than `events`, so the count says these are the newest. */
+  moreToLoad?: boolean;
   nameFor: NameFor;
   query: string;
   /** Whether a row's What shows the trail's stored name on hover: Admin's, not a person's. */
   storedNames?: boolean;
+  /** Drawn under a row's Decision: Admin's "Why?" on the rows a control decided. */
+  rowAction?: (event: AuditEvent) => React.ReactNode;
   /**
-   * Drawn above the table, given how many rows it shows ("3 events", "1 of 3 events") and the filter
-   * buttons to place beside the search. It stays put; only the rows under it scroll.
+   * Drawn above the table, given how many rows it shows ("3 events", "1 of 3 events", "Newest 50
+   * events" while older ones are still to load) and the filter buttons to place beside the search.
+   * It stays put; only the rows under it scroll.
    */
   toolbar: (parts: {
     count: string;
@@ -121,8 +131,8 @@ export function AuditTable({
   const [sorting, setSorting] = useState<SortingState>(INITIAL_SORT);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const columns = useMemo(
-    () => auditColumns(nameFor, storedNames, deploymentName),
-    [nameFor, storedNames, deploymentName],
+    () => auditColumns(nameFor, storedNames, deploymentName, rowAction),
+    [nameFor, storedNames, deploymentName, rowAction],
   );
   const table = useTable({
     features,
@@ -144,7 +154,7 @@ export function AuditTable({
   return (
     <>
       {toolbar({
-        count: countLabel(rows.length, events.length),
+        count: countLabel(rows.length, events.length, moreToLoad),
         filters: FACETS.map((facet) => {
           const column = table.getColumn(facet.id);
           const selected = (column?.getFilterValue() as string[]) ?? [];
@@ -207,6 +217,11 @@ export function AuditTable({
                         // Room for a Bot's name and "Started by a person" on a line each; a longer
                         // name wraps. Without it the column gave way to Decision's longer lines.
                         cell.column.id === "bot" && "min-w-40",
+                        // Room for a reason line such as "Stopped by: Bots may not visit social
+                        // media sites" on a line or two. Without it the column got what What, whose
+                        // longest rows never wrap, left over: about 150px at 1280, and the rule's
+                        // name ran to three lines.
+                        cell.column.id === "decision" && "min-w-64",
                       )}
                       data-column={cell.column.id}
                       key={cell.id}
@@ -217,6 +232,16 @@ export function AuditTable({
               </TableRow>
             );
           })}
+          {footer && rows.length > 0 ? (
+            <TableRow className="hover:bg-transparent">
+              <TableCell
+                className="p-0"
+                colSpan={columns.length - UNDRAWN.size}
+              >
+                {footer}
+              </TableCell>
+            </TableRow>
+          ) : null}
         </TableBody>
       </Table>
       {events.length > 0 && rows.length === 0 ? (
@@ -224,6 +249,7 @@ export function AuditTable({
           <PageEmpty icon={IconSearch} title="No matches">
             Nothing loaded matches this search and these filters.
           </PageEmpty>
+          {footer}
         </div>
       ) : null}
     </>
@@ -315,16 +341,31 @@ function Facet({
   );
 }
 
-/** How many rows the table is showing, for the toolbar. */
-function countLabel(shown: number, total: number): string {
-  const noun = total === 1 ? "event" : "events";
-  return shown === total ? `${total} ${noun}` : `${shown} of ${total} ${noun}`;
+/**
+ * How many rows the table is showing, for the toolbar. While the server has older events than those
+ * loaded, the count names them the newest, so it never reads as the size of the whole trail.
+ */
+function countLabel(
+  shown: number,
+  loaded: number,
+  moreToLoad: boolean,
+): string {
+  const noun = loaded === 1 ? "event" : "events";
+  if (moreToLoad) {
+    return shown === loaded
+      ? `Newest ${loaded} ${noun}`
+      : `${shown} of the newest ${loaded} ${noun}`;
+  }
+  return shown === loaded
+    ? `${loaded} ${noun}`
+    : `${shown} of ${loaded} ${noun}`;
 }
 
 function auditColumns(
   nameFor: NameFor,
   storedNames: boolean,
   deployment: string,
+  rowAction?: (event: AuditEvent) => React.ReactNode,
 ): ColumnDef<typeof features, AuditEvent>[] {
   return [
     {
@@ -404,7 +445,10 @@ function auditColumns(
       id: "decision",
       header: "Decision",
       cell: ({ row }) => (
-        <DecisionCell event={row.original} storedNames={storedNames} />
+        <>
+          <DecisionCell event={row.original} storedNames={storedNames} />
+          {rowAction?.(row.original)}
+        </>
       ),
       enableSorting: false,
     },

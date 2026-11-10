@@ -9,24 +9,41 @@ import {
   IconSearch,
   IconX,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useQuery,
+} from "@tanstack/react-query";
+import { type ReactNode, useEffect, useState } from "react";
+import { AskTheTrail, AuditAnswerNote } from "@/components/audit/ask-the-trail";
 import type { AuditEvent } from "@/components/audit/audit-cells";
+import {
+  AuditFilterChips,
+  type ChipFilters,
+  sameFilters,
+  withFilters,
+} from "@/components/audit/audit-filters";
 import { AuditTable } from "@/components/audit/audit-table";
 import { PageEmpty, PageShell } from "@/components/layout/page-shell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { explainable, WhyButton } from "@/components/what-if/why-button";
 import { useBotNames } from "@/lib/agents/bot-names";
 import {
+  CALLS_RECORDED_AS_CHANGES,
   COMPUTER_ACTION_EVENT_TYPES,
   DID_NOT_HAPPEN_EVENT_TYPES,
   eventTypeFilter,
-  CALLS_RECORDED_AS_CHANGES,
   OPENBOT_WORKING_EVENT_TYPES,
   oneRowPerAction,
   REFUSED_EVENT_TYPES,
 } from "@/lib/audit/outcome";
-import { auditEventsQueryOptions, auditExportUrl } from "@/lib/audit/queries";
+import type { AuditAnswer, AuditFilterLabels } from "@/lib/audit/ask";
+import {
+  auditEventsQueryOptions,
+  auditExportUrl,
+  auditVocabularyQueryOptions,
+} from "@/lib/audit/queries";
 import { client } from "@/lib/client";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
 import { useManagePaths } from "@/lib/manage-paths";
@@ -114,6 +131,10 @@ function withSkillTitles(
   });
 }
 
+/** Admin's "Why?" on a row one of OpenBot's controls decided: see `what-if/why-button.tsx`. */
+const whyFor = (event: AuditEvent) =>
+  explainable(event) ? <WhyButton event={event} /> : null;
+
 /** What the page says under its title in Admin, where an admin reviews every Bot against policy. */
 const ADMIN_DESCRIPTION =
   "Review Bot actions and actions blocked by this deployment’s policy.";
@@ -125,12 +146,25 @@ const ADMIN_DESCRIPTION =
  *
  * `bot` narrows every view to one Bot's rows, asked of the server; `onClearBot` takes it off.
  */
+const NO_LABELS: AuditFilterLabels = {
+  bots: {},
+  people: {},
+  apps: {},
+  rules: {},
+};
+
 export function AuditPage({
+  ask = false,
   bot,
   children,
   description = ADMIN_DESCRIPTION,
   onClearBot,
 }: {
+  /**
+   * Admin's Ask and its filter chips: questions in English, and the trail's own filters by app,
+   * tool, effect, action and rule. The personal edition's Activity has neither.
+   */
+  ask?: boolean;
   bot?: string;
   children?: ReactNode;
   description?: string;
@@ -138,22 +172,55 @@ export function AuditPage({
 } = {}) {
   const paths = useManagePaths();
   const [view, setView] = useState<string>(FILTERS[0].search);
+  /*
+   * Admin's filters, as chips: asked of the server beside the view, from an answer or added by hand.
+   * A Bot's own Activity page links here with `bot`, which arrives as that Bot's chip, so the one Bot
+   * filter there is the chip, and taking it off takes it out of the address too.
+   */
+  const [chips, setChipState] = useState<ChipFilters>(() =>
+    ask && bot ? { bot } : {},
+  );
+  useEffect(() => {
+    if (ask && bot)
+      setChipState((current) =>
+        current.bot === bot ? current : { ...current, bot },
+      );
+  }, [ask, bot]);
+  const setChips = (next: ChipFilters) => {
+    setChipState(next);
+    if (bot && next.bot !== bot) onClearBot?.();
+  };
+  const [answer, setAnswer] = useState<
+    (AuditAnswer & { question: string }) | null
+  >(null);
+  // This deployment's Bots, apps and rules, asked for the first time a chip menu opens.
+  const [vocabularyWanted, setVocabularyWanted] = useState(false);
+  const vocabulary = useQuery({
+    ...auditVocabularyQueryOptions(),
+    enabled: ask && vocabularyWanted,
+  }).data;
   // The stored event names and OpenBot's own working are Admin's to read; the personal edition's
   // Activity is anybody's page. Its route has the edition loaded before this draws.
   const edition = useQuery(deploymentCapabilitiesQueryOptions()).data?.edition;
-  const search =
-    edition === "personal"
-      ? withoutOpenBotWorking(withBot(view, bot))
-      : withBot(view, bot);
+  const asked = ask ? withFilters(view, chips) : withBot(view, bot);
+  const search = edition === "personal" ? withoutOpenBotWorking(asked) : asked;
   const [query, setQuery] = useState("");
-  const events = useQuery(auditEventsQueryOptions(search));
+  // A page at a time, newest first; "Show older events" under the last row asks for the next.
+  /*
+   * The rows already shown stay while the next filters' rows load, so the toolbar and the chip menu
+   * open in it are not taken down and drawn again on every tick. Only the first load draws nothing.
+   */
+  const events = useInfiniteQuery({
+    ...auditEventsQueryOptions(search),
+    placeholderData: keepPreviousData,
+  });
   // Activity names a skill by the title its page shows; the trail keeps only its slug.
   const skills = useQuery({
     ...pluginsPageQueryOptions(),
     enabled: edition === "personal",
   }).data?.skills;
   const rows = withSkillTitles(
-    oneRowPerAction((events.data?.events ?? []) as AuditEvent[]),
+    oneRowPerAction(events.data?.pages.flatMap((page) => page.events) ?? []),
     skills,
   );
   const nameFor = useBotNames();
@@ -211,7 +278,34 @@ export function AuditPage({
         <div
           className={children ? "flex h-[60vh] min-h-80 flex-col" : "contents"}
         >
-          {events.isPending ? null : events.isError ? (
+          {/*
+           * Above the table rather than in its toolbar: a question being typed and its answer outlast
+           * anything the table draws again. The answer's chips are the toolbar's, beside the search.
+           */}
+          {ask ? (
+            <div className="flex shrink-0 flex-col gap-2 px-4 pb-3">
+              <AskTheTrail
+                onAnswer={(next) => {
+                  setAnswer(next);
+                  // The answer is the whole question, so it starts from every event. One the trail
+                  // can't give clears the chips too, so no earlier filters stand under it as its rows.
+                  setView(FILTERS[0].search);
+                  setChips(next.filters);
+                }}
+              />
+              {answer ? (
+                <AuditAnswerNote
+                  answer={answer}
+                  edited={
+                    answer.answerable !== "no" &&
+                    !sameFilters(chips, answer.filters)
+                  }
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {events.isPending ? null : events.isError &&
+            !events.isFetchNextPageError ? (
             <p className="px-4 text-destructive text-sm" role="alert">
               Couldn't load these events. Reload the page.
             </p>
@@ -219,16 +313,39 @@ export function AuditPage({
             <AuditTable
               deploymentName={paths.deploymentName}
               events={rows}
+              footer={
+                events.hasNextPage ? (
+                  <div className="flex flex-col items-center gap-2 py-3">
+                    {events.isFetchNextPageError ? (
+                      <p className="text-destructive text-sm" role="alert">
+                        Couldn't load older events. Try again.
+                      </p>
+                    ) : null}
+                    <Button
+                      disabled={events.isFetchingNextPage}
+                      onClick={() => events.fetchNextPage()}
+                      size="sm"
+                      variant="outline"
+                    >
+                      {events.isFetchingNextPage
+                        ? "Loading…"
+                        : "Show older events"}
+                    </Button>
+                  </div>
+                ) : null
+              }
+              moreToLoad={events.hasNextPage}
               nameFor={nameFor}
               query={query}
               storedNames={edition !== "personal"}
+              {...(ask ? { rowAction: whyFor } : {})}
               toolbar={({ count, filters }) => (
                 <div className="flex shrink-0 flex-col gap-3 border-border border-b px-4 pb-3">
                   {/*
                    * The saved views are one control with one answer, so they are drawn as a segmented
                    * group: the pressed one is filled, the rest sit flat inside the same outline.
                    */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-muted-foreground text-xs">View</span>
                     <fieldset
                       aria-label="View"
@@ -271,7 +388,7 @@ export function AuditPage({
                       />
                     </div>
                     {/* Beside the other filters, on the row that wraps: it narrows what is asked for. */}
-                    {bot ? (
+                    {bot && !ask ? (
                       <Button
                         aria-label={`Show every Bot, not only ${nameFor(bot)}`}
                         onClick={onClearBot}
@@ -282,8 +399,26 @@ export function AuditPage({
                         <IconX />
                       </Button>
                     ) : null}
-                    {filters}
-                    <span className="ml-1 text-muted-foreground text-xs tabular-nums">
+                    {/*
+                     * Admin's one set of filters: the answer's chips and Add filter, asked of the
+                     * server. Anywhere else, the buttons that narrow the rows already loaded.
+                     */}
+                    {ask ? (
+                      <AuditFilterChips
+                        filters={chips}
+                        labels={answer?.labels ?? NO_LABELS}
+                        nameFor={nameFor}
+                        onChange={setChips}
+                        onOpen={() => setVocabularyWanted(true)}
+                        vocabulary={vocabulary}
+                      />
+                    ) : (
+                      filters
+                    )}
+                    <span
+                      className="ml-1 text-muted-foreground text-xs tabular-nums"
+                      data-audit-count
+                    >
                       {count}
                     </span>
                     <div className="ml-auto flex items-center gap-2">

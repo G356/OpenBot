@@ -105,6 +105,8 @@ export type Shortfall = {
   wsl?: boolean;
   /** The drive that holds its machine's disk, `C:`. */
   drive?: string;
+  /** `diskGb` is what is free on `drive`, which ran short rather than the machine's own disk. */
+  freeOnDrive?: boolean;
 };
 
 export type LocalReport = {
@@ -240,6 +242,26 @@ export function setUpLocalEval(
     throw failure(rejection);
   });
   return { attempt, report };
+}
+
+/**
+ * While a setup waits for room on a drive that is short: that drive's shortfall now, or null once
+ * there is room (`local_eval::drive_short`). Null too when it can't say: the setup measures again.
+ */
+export function localEvalRoom(): Promise<Shortfall | null> {
+  return invoke<Shortfall | null>("local_eval_room").catch(() => null);
+}
+
+/**
+ * A setup the native side did not start, because the drive that holds the engine's disk is short
+ * of what OpenBot needs (`local_eval::checked_call`). Not a failure: it waits for room.
+ */
+export function heldForRoom(report: LocalReport): Shortfall | null {
+  return report.reason === "resources-short" &&
+    report.shortfall?.freeOnDrive === true &&
+    report.shortfall.disk
+    ? report.shortfall
+    : null;
 }
 
 /**
@@ -508,6 +530,15 @@ export async function wakeEngine(root: string): Promise<void> {
   await invoke("wake_engine", { root });
 }
 
+/**
+ * The wait for the back end to report ready ended without it, and why, in the sentence the window
+ * shows. The log then says how long it waited and what the last status was (`back_end_wait_ended`).
+ * Never fails the step it is about.
+ */
+export function backEndWaitEnded(why: string): void {
+  invoke("back_end_wait_ended", { why }).catch(() => {});
+}
+
 /** Whether the OpenBot app's page may offer the back end dashboard for `root`. */
 export function offerLocalIntelligence(
   root: string,
@@ -600,7 +631,7 @@ export function licenceExpiresSoon(
 }
 
 /** How main.rs starts an Intelligence stop failure (`INTELLIGENCE_STOP_FAILED`). */
-export const intelligenceStopFailed = "Back end stop failed: ";
+export const intelligenceStopFailed = "Backend stop failed: ";
 
 /**
  * Splits a Stop failure into OpenBot's own lines and the local Intelligence stack's. OpenBot has

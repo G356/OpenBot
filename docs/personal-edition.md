@@ -48,7 +48,9 @@ The server's container is given the supervisor by name in `docker-compose.yml` u
 A new installation starts with one Bot, the Personal Assistant. When a Bot was picked during setup,
 the Personal Assistant runs on what was picked: it takes the `picked-harness` row's id and
 connection, and the Personal Assistant's instructions, skills and conversation, and its subtitle
-says what runs it ("Everyday life. Powered by LangChain."). With nothing picked, as
+says what runs it ("Everyday life. Powered by LangChain.", which its profile shows as "Everyday life
+agent. (powered by a LangChain agent; you can bring your own agent from any stack.)"). With nothing
+picked, as
 `start.sh` leaves it, `PICKED_HARNESS_URL` is empty, the `picked-harness` row in
 [`examples/personal/agents.yaml`](../examples/personal/agents.yaml) is dropped, and the Personal
 Assistant runs inside the server ("Everyday life. Powered by OpenBot."). Either way it is an
@@ -68,7 +70,7 @@ runs on the one computer, beside your Bots (see [Teach a Bot](#teach-a-bot) belo
 Chrome window opens. Narration comes from the OpenBot window, as on hosted OpenBot. The window's web
 view has no speech recognition that stays on your computer, so the desktop app does it instead: Apple's
 Speech framework with on-device recognition required on macOS, the in-process SAPI recognizer on
-Windows. Your voice never leaves the machine; where neither can recognise your language, narration is
+Windows. Your voice never leaves the machine; where neither can recognize your language, narration is
 off. macOS asks once for speech recognition and the microphone. The desktop runs
 no browser of its own on your machine, and writes no `OPENBOT_BROWSER_URL`; Start takes out one an
 earlier version wrote.
@@ -119,7 +121,7 @@ Learning: a Bot those settings left out is taken back in at the next start, or i
 | --- | --- |
 | Use Bots, cloud browser, network and computer, local computer access (folders, in OpenBot Desktop), custom rules, password manager, apps a Bot uses as you, check-ins | On |
 | Slack and Teams, Team Bots, Isolated Bots | Off |
-| Always ask before making changes | Off for anybody who has not chosen otherwise. Paying, and deleting, sending, sharing or posting in your apps and on websites, ask anyway, as does every edit or command in a folder on this computer. A Bot's own computer is its scratch space. See [Approvals](approvals.md) |
+| Extra vigilant | Off for anybody who has not chosen otherwise. Paying, and deleting, sending, sharing or posting in your apps and on websites, ask anyway, as does every edit or command in a folder on this computer. A Bot's own computer is its scratch space. See [Approvals](approvals.md) |
 | Stop idle computers | Never: there is one |
 | Check-ins per Bot per day | 24, as in the team edition |
 | SSO, action recording, model and MCP allowlists, skill sharing | Off |
@@ -164,7 +166,8 @@ Where `OPENBOT_BROWSER_URL` is set, as `scripts/start.sh` sets it, your browser 
 
 ## What the app shows
 
-The menu is **Bots**, **Connections** and **Settings**. There is no Admin and no Capabilities page.
+The menu is **Bots**, **Routines**, **Connections** and **Settings**. There is no Admin and no
+Capabilities page.
 
 **Connections** is every way a Bot signs in to something, because adding an app and connecting your
 account are the same decision when one person makes both:

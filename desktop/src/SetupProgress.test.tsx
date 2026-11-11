@@ -8,6 +8,7 @@ import {
 } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { cleanup, render, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 const { INSTALL_BLURB, SetupProgress, plainInstallSteps } = await import(
   "./SetupProgress"
@@ -96,6 +97,48 @@ test("install progress is the bytes and the parts after them, and disappears aft
   expect(row.queryByRole("progressbar")).toBeNull();
 });
 
+// The rest of OpenBot downloads alongside step 2. Said as its own row at the same time, the Install
+// step read "Step 2 of 4" and "Step 3 of 4" in progress at once on a live Windows run.
+test("the rest of OpenBot is the Install list's third step, in progress only once the second is done", () => {
+  const rest = { bytes: 400_000_000, size: 1_600_000_000 };
+  const own = {
+    step: "images",
+    ok: true,
+    detail: "Downloading local software.",
+    downloads: { done: 1, total: 5, bytes: 1_200_000_000, size: 3_400_000_000 },
+  };
+  const said = (rows: ReturnType<typeof plainInstallSteps>) =>
+    rows.map(
+      (row) =>
+        `${row.step} | ${row.running ? `Step ${row.position?.at} of 4` : row.ok ? "Complete" : "Failed"}`,
+    );
+  expect(
+    said(plainInstallSteps([{ ...own, running: true }], true, null, rest)),
+  ).toEqual(["Downloading OpenBot | Step 2 of 4"]);
+  const done = plainInstallSteps(
+    [{ ...own, running: false }],
+    false,
+    null,
+    rest,
+  );
+  expect(said(done)).toEqual([
+    "Downloading OpenBot | Complete",
+    "Downloading the rest of OpenBot | Step 3 of 4",
+  ]);
+  expect(done[1]?.downloads).toEqual(rest);
+  // A failed install says its failure: nothing after it is in progress.
+  expect(
+    said(
+      plainInstallSteps(
+        [{ ...own, running: false, ok: false }],
+        false,
+        null,
+        rest,
+      ),
+    ),
+  ).toEqual(["Downloading OpenBot | Failed"]);
+});
+
 // Reported on 1.0.0-rc.1: a full bar read "1.1 GB of 1.1 GB · 1 of 5 parts left" while the
 // last image was still being unpacked, so a person took the step for done. On Windows F the same
 // line sat under a full bar with no time so far and no time left, its last bytes uncounted, and
@@ -147,14 +190,43 @@ test("with every byte in and parts still unpacking, the bar is never full, keeps
   ).toBeTruthy();
   expect(value()).toBeLessThan(1);
 
-  // Bytes still arriving: their share of the bar, and how many parts are left.
+  // A report that counts its bytes short for a moment does not take it back to downloading: on
+  // Windows F the row read "Downloading OpenBot. About 2 minutes left." for a few seconds between
+  // "Unpacking OpenBot (3 of 5)" and "(5 of 5)".
+  const unpacked = value();
   view.rerender(
+    <SetupProgress
+      steps={installing({
+        done: 4,
+        total: 5,
+        bytes: 1_000_000_000,
+        size,
+        bytesPerSecond: 9_000_000,
+      })}
+    />,
+  );
+  expect(row.getByText(/^Unpacking OpenBot \(5 of 5\)\./)).toBeTruthy();
+  expect(row.queryByText(/^Downloading OpenBot\./)).toBeNull();
+  expect(row.queryByText(/minutes left/)).toBeNull();
+  expect(value()).toBeGreaterThanOrEqual(unpacked);
+
+  // A download whose bytes are still arriving: their share of the bar, and the parts left.
+  cleanup();
+  const arriving = render(
     <SetupProgress
       steps={installing({ done: 4, total: 5, bytes: 1_000_000_000, size })}
     />,
   );
-  expect(value()).toBeCloseTo(0.8 * (1 / 1.1) + 0.2 * 0.8, 3);
-  expect(row.getByText("1.0 GB of 1.1 GB · 1 of 5 parts left")).toBeTruthy();
+  expect(
+    Number(
+      arriving
+        .getByRole("progressbar", { name: "Download progress" })
+        .getAttribute("value"),
+    ),
+  ).toBeCloseTo(0.8 * (1 / 1.1) + 0.2 * 0.8, 3);
+  expect(
+    arriving.getByText("1.0 GB of 1.1 GB · 1 of 5 parts left"),
+  ).toBeTruthy();
 });
 
 /*
@@ -287,4 +359,50 @@ test("the install blurb names the parts of OpenBot it installs, in two sentences
     /—|agent|Intelligence|back ?end|front ?end/i,
   );
   expect(INSTALL_BLURB).toContain("about 10 minutes");
+});
+
+/**
+ * Behind the AI step on Windows G, a setup not started on a C: too short was a red "Setup stopped"
+ * card with the troubleshooting logs. The background row says it as paused, in the account step's
+ * words, with Try again, and with no time running on.
+ */
+test("the background row says a setup paused for room calmly, with Try again", async () => {
+  const { installingBehind } = await import("./SetupProgress");
+  const said =
+    "This computer has 13.9 GB of free space on drive C:, and OpenBot needs 40 GB. Free up some space, then Try again.";
+  let looked = 0;
+  const row = installingBehind({
+    steps: [],
+    installing: false,
+    installed: true,
+    since: Date.now() - 200_000,
+    backEnd: {
+      at: "setup",
+      running: true,
+      stopped: false,
+      ready: false,
+      detail: null,
+      download: null,
+      since: Date.now() - 60_000,
+      held: said,
+      tryAgain: () => {
+        looked += 1;
+      },
+    },
+  });
+  expect(row?.paused).toBe(true);
+  const view = render(
+    <SetupProgress steps={row ? [row] : []} label="Background install" />,
+  );
+  const item = within(
+    view.getByRole("listitem", {
+      name: "Installing OpenBot in the background",
+    }),
+  );
+  expect(item.getByText("Step 3 of 4 · Paused")).toBeTruthy();
+  expect(item.getByText(said)).toBeTruthy();
+  expect(item.queryByText(/elapsed/)).toBeNull();
+  expect(view.container.querySelector(".step-spinner")).toBeNull();
+  await userEvent.click(item.getByRole("button", { name: "Try again" }));
+  expect(looked).toBe(1);
 });

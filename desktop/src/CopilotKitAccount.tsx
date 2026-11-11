@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { CopilotKitLogo } from "./CopilotKitLogo";
 import { CopilotKitSignInWait } from "./CopilotKitSignInWait";
 import { ExternalLink } from "./ExternalLink";
 import {
@@ -16,7 +15,7 @@ import {
   signInToCopilotKit,
 } from "./localEvalCli";
 import { engineTooSmallSaid } from "./localReadiness";
-import { PodmanGoAhead } from "./PodmanGoAhead";
+import { PausePodman, PodmanGoAhead } from "./PodmanGoAhead";
 import { InlineFailure, type Problem } from "./Problem";
 import { Sections } from "./Sections";
 import {
@@ -24,6 +23,7 @@ import {
   type Progress,
   SetupProgress,
   StatusLine,
+  StepFooter,
 } from "./SetupProgress";
 import { Command } from "./WindowsBlocker";
 
@@ -44,7 +44,26 @@ type Seen =
   /** The CLI refused the container engine. Trying again by itself would not change it. */
   | { at: "unsupported-engine"; said: string; switchEngine: boolean };
 
-const COULD_NOT_CHECK = "Couldn’t check your CopilotKit account. Try again.";
+const COULD_NOT_CHECK = "Couldn’t check your OpenBot account. Try again.";
+
+/**
+ * The signed-out step's footnote: what signing in does, and where OpenBot keeps what you make.
+ * One string so a change of wording is one line.
+ *
+ * Every part is what the code does. Signing in gets the license key (`onboard local-terms`, then
+ * `local setup`) and sets up apps (`connect_copilotkit_apps`). It also links usage data to the
+ * account (`telemetry link`), which Finishing setup's checkbox turns off, so the line never says
+ * "only". Conversations and files are kept in OpenBot's database and Bot computers on this
+ * computer. It never says they stay here: a conversation goes to the AI provider the person
+ * chose, and connected apps get what a Bot sends them.
+ */
+const WHAT_SIGNING_IN_SENDS =
+  "Signing in gets your free license key and sets up your apps. OpenBot keeps your conversations and files on this computer.";
+/**
+ * The signed-out step's lede. The first screen says this OpenBot is self-contained, so this one says
+ * only what the step is for: the license key, and that signing in gets it.
+ */
+const LICENSE_KEY = "OpenBot needs a free license key. Sign in to get one.";
 const SIGN_IN_DID_NOT_FINISH = "Sign-in didn’t finish. Try again.";
 const SETTING_UP_ENGINE =
   "You're signed in. OpenBot is setting up the software it runs on. The license agreement comes next.";
@@ -94,10 +113,32 @@ export function CopilotKitAccount({
   handOff = null,
   engine = null,
   goAhead = null,
+  pauseOffer = null,
   behind,
+  engineSettled = true,
+  engineUpdating = false,
+  retried = 0,
 }: {
   /** The installation folder the apps are connected for. */
   root: string;
+  /**
+   * Install has the software OpenBot runs on answering and new enough, or is done. Until then a
+   * refusal of the engine is not this step's to say: Install may be updating it. Docker Desktop
+   * 4.31 calls itself "Docker Desktop (containerized)", which the CLI refuses, and a Windows tester
+   * was told to switch to Docker Desktop while OpenBot was updating it. The step waits instead, and
+   * says what Install is doing.
+   */
+  engineSettled?: boolean;
+  /**
+   * Install is updating the engine now. The check is not asked at all meanwhile: the engine being
+   * updated refuses it. It is asked once Install has settled the engine.
+   */
+  engineUpdating?: boolean;
+  /**
+   * Setup's own Try again, in its failure card, was chosen: whatever this step stopped at is asked
+   * again with it. With that card up the step offers no Try again of its own, so there is one.
+   */
+  retried?: number;
   /**
    * What another app's window wants while Install, behind this step, waits on it: Docker Desktop
    * starting, or a password prompt. See `handOffNow`.
@@ -116,24 +157,39 @@ export function CopilotKitAccount({
    */
   goAhead?: string | null;
   /**
+   * On a Mac whose own Podman OpenBot can't use, Install behind this step waits for the person's
+   * yes before it pauses theirs: its line, from `pauseOfferNow`, said with the button that says yes.
+   */
+  pauseOffer?: string | null;
+  /**
    * What is installing behind this step, as one row: what it is doing, how far along, and for how
    * long (`installingBehind`). Shown under every part of the step, so the person always knows
    * OpenBot is still installing. It carries the engine's line and any hand-off, so those are not
-   * said twice. Its slot is held even while it is null; without it, there is none.
+   * said twice. Its slot is held even while it is null; without it, there is none. Given what the
+   * rest of the install waits on here, which this step knows: signing in only while the person is
+   * not signed in.
    */
-  behind?: Progress | null;
+  behind?: (waitingFor: string) => Progress | null;
   /** Signed in and agreed: the version accepted here, or null when nothing needed accepting. */
   onDone: (acceptedVersion: string | null) => void;
   /** A failure from setup itself, shown inside this card rather than under it. */
   failure?: ReactNode;
 }) {
   const [seen, setSeen] = useState<Seen>({ at: "checking" });
+  /** The CLI's sign-in has opened its page in the browser: the person is signing in now. */
+  const [signInPage, setSignInPage] = useState(false);
   const attempt = useRef<string | null>(null);
   const finished = useRef(false);
   const done = useRef(onDone);
   done.current = onDone;
   const installation = useRef(root);
   installation.current = root;
+  const settled = useRef(engineSettled);
+  settled.current = engineSettled;
+  const updating = useRef(engineUpdating);
+  updating.current = engineUpdating;
+  /** The check waited for Install to settle the engine, and is asked once it has. */
+  const checkWhenSettled = useRef(false);
 
   const finish = useCallback((version: string | null) => {
     if (finished.current) return;
@@ -167,6 +223,17 @@ export function CopilotKitAccount({
   const waitingSince = useRef<number | null>(null);
   const askAgain = useRef<ReturnType<typeof setTimeout> | null>(null);
   const check = useCallback(() => {
+    /*
+     * Not asked at all until Install has the engine answering and new enough. The check reaches the
+     * engine, and one being updated is refused: on a Windows tester's old Docker Desktop it answered
+     * "blocked (UnsupportedEngine) ... (containerized)" fourteen times in forty seconds while
+     * OpenBot updated it. The step waits, saying what Install is doing, and asks once it has.
+     */
+    if (updating.current) {
+      checkWhenSettled.current = true;
+      setSeen({ at: "waiting-for-engine" });
+      return;
+    }
     // While it waits for the engine, each check asked again keeps saying what it waits on.
     if (waitingSince.current === null) setSeen({ at: "checking" });
     const started = localEvalTerms();
@@ -175,9 +242,24 @@ export function CopilotKitAccount({
       (terms) => {
         if (attempt.current !== started.attempt) return;
         attempt.current = null;
+        // Refused while Install may still update the engine: not the person's to act on yet.
+        const refusedBeforeUpdate =
+          !settled.current &&
+          terms.status === "blocked" &&
+          terms.reason === "unsupported-engine";
+        // Refused before Install has settled the engine: asked once more when it has, not every two
+        // seconds meanwhile.
+        if (refusedBeforeUpdate) {
+          checkWhenSettled.current = true;
+          setSeen({ at: "waiting-for-engine" });
+          return;
+        }
         if (terms.status === "engine-not-ready") {
           // Install is still bringing the engine up: keep checking rather than fail, and say so.
           // On a new Mac that is minutes of Podman installing, under "Checking your account".
+          // While Install has not settled the engine, the wait has no limit: an update can take
+          // longer, and an install that stops says so in its own card.
+          if (!settled.current) waitingSince.current = null;
           const since = waitingSince.current ?? Date.now();
           waitingSince.current = since;
           if (Date.now() - since < ENGINE_WAIT_LIMIT_MS) {
@@ -238,6 +320,14 @@ export function CopilotKitAccount({
   const checkAgain = useRef(check);
   checkAgain.current = check;
 
+  // Install settled the engine: the check that waited for it is asked now.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: when the engine settles, not each render.
+  useEffect(() => {
+    if (!engineSettled || !checkWhenSettled.current) return;
+    checkWhenSettled.current = false;
+    check();
+  }, [engineSettled]);
+
   /**
    * The CLI's `login`: done at once when it already has a sign-in, otherwise it opens the browser
    * and waits for the person to approve. Then the agreement.
@@ -245,6 +335,7 @@ export function CopilotKitAccount({
   const signIn = useCallback(async () => {
     const started = signInToCopilotKit();
     attempt.current = started.attempt;
+    setSignInPage(false);
     setSeen({ at: "signing-in", attempt: started.attempt });
     const failed = () =>
       setSeen({ at: "failed", said: SIGN_IN_DID_NOT_FINISH, retry: "sign-in" });
@@ -272,6 +363,16 @@ export function CopilotKitAccount({
     };
   }, []);
 
+  // Setup's Try again: whatever this step stopped at is asked again with the install.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: on each Try again, not each render.
+  useEffect(() => {
+    if (retried === 0) return;
+    if (seen.at === "failed") {
+      if (seen.retry === "sign-in") void signIn();
+      else check();
+    } else if (seen.at === "unsupported-engine") check();
+  }, [retried]);
+
   /** Stop the CLI's sign-in and go back to the start of this step. */
   function cancelSignIn() {
     const running = attempt.current;
@@ -282,7 +383,7 @@ export function CopilotKitAccount({
 
   const agreement = seen.at === "agreement" ? seen.terms : null;
   // Signed in and agreed already: what is left to say is about the apps. Said while they connect
-  // too, a few seconds after Accept, which flashed "Sign in to CopilotKit" and its sign-in lede.
+  // too, a few seconds after Accept, which flashed the sign-in heading and its sign-in lede.
   const connecting = seen.at === "apps";
   const appsFailed = seen.at === "apps-failed";
   const refused = seen.at === "unsupported-engine" ? seen : null;
@@ -290,12 +391,37 @@ export function CopilotKitAccount({
   // The person closed macOS's password prompt: said in a card of its own, with Try again, on
   // whatever this step shows. Install asks again by itself meanwhile.
   const asking = goAhead !== null;
+  /*
+   * Not known yet whether the person is signed in: the CLI is checking a sign-in it may already
+   * have. On Windows G a signed-in person saw the signed-out pitch ("It requires a free license
+   * key", "does NOT send traffic data") for two seconds before the license agreement. Only the
+   * check is said until there is an answer.
+   */
+  const checkingAccount =
+    seen.at === "checking" || (seen.at === "signing-in" && !signInPage);
+  const signedOut =
+    checkingAccount ||
+    seen.at === "signing-in" ||
+    seen.at === "signed-out" ||
+    (seen.at === "failed" && seen.retry === "sign-in");
+  const behindRow = behind?.(
+    connecting
+      ? "The rest of the install starts once your apps are set up."
+      : appsFailed
+        ? "The rest of the install starts when you connect your apps or continue."
+        : // Not known yet: nothing about signing in to somebody who may be signed in already.
+          checkingAccount
+          ? "The rest of the install starts when this step is done."
+          : signedOut
+            ? "The rest of the install starts after you sign in and accept the license agreement."
+            : "The rest of the install starts after you accept the license agreement.",
+  );
   return (
     <div className="sheet">
-      {/* OpenBot is what is being set up, so its mark heads this step as it heads every other.
-          The account is CopilotKit's, so its logotype leads the step itself. */}
-      <Sections at="Account" />
-      <CopilotKitLogo />
+      {/* OpenBot is what is being set up, so its mark heads this step as it heads every other,
+          and here it says "by CopilotKit" beside the name. CopilotKit's logotype here made the step
+          read as signing up for a CopilotKit product. */}
+      <Sections at="Account" byCopilotKit />
       <h1>
         {agreement
           ? "Accept the license agreement"
@@ -309,21 +435,25 @@ export function CopilotKitAccount({
                   : "Change this computer's setup"
                 : waitingForEngine
                   ? "Setting up this computer"
-                  : "Sign in to CopilotKit"}
+                  : checkingAccount
+                    ? "Your OpenBot account"
+                    : "Get your free license key"}
       </h1>
-      <p className="lede">
-        {agreement
-          ? // The organization and the agreement's version are the log's: on Windows F the
-            // lede ended "for CopilotKit🪁." and the link read "(developer-edition-2026-10-01-web)".
-            "To run OpenBot on this computer, accept the CopilotKit license agreement."
-          : connecting || appsFailed
-            ? "OpenBot uses your CopilotKit account to set up apps like Gmail and Slack."
-            : refused
-              ? refused.said
-              : waitingForEngine
-                ? SETTING_UP_ENGINE
-                : "OpenBot runs on this computer with your CopilotKit account. Sign in, then accept the license agreement."}
-      </p>
+      {!checkingAccount && (
+        <p className="lede">
+          {agreement
+            ? // The organization and the agreement's version are the log's: on Windows F the
+              // lede ended "for CopilotKit🪁." and the link read "(developer-edition-2026-10-01-web)".
+              "To run OpenBot on this computer, accept the OpenBot by CopilotKit license agreement."
+            : connecting || appsFailed
+              ? "OpenBot uses your account to set up apps like Gmail and Slack."
+              : refused
+                ? refused.said
+                : waitingForEngine
+                  ? SETTING_UP_ENGINE
+                  : LICENSE_KEY}
+        </p>
+      )}
       {refused?.switchEngine && (
         <ol className="blocker-steps">
           <li>
@@ -346,11 +476,12 @@ export function CopilotKitAccount({
         !connecting &&
         !appsFailed &&
         !refused &&
-        !waitingForEngine && (
-          <p className="footnote">
-            Your conversations and files are stored on this computer. Signing in
-            does not send them to CopilotKit.
-          </p>
+        !waitingForEngine &&
+        !checkingAccount && (
+          // What signing in does. Never "only gets the license key": once signed in, this step
+          // also sets up apps. Nothing broader, such as "no data leaves this computer": setup and
+          // usage telemetry, the AI provider and connected apps all reach the network.
+          <p className="footnote">{WHAT_SIGNING_IN_SENDS}</p>
         )}
 
       {/* The agreement waits on the engine. While it does, this says what Install is doing to bring
@@ -359,21 +490,26 @@ export function CopilotKitAccount({
           is at. Nobody is asked to click before a prompt: a closed one has its card, with Try
           again. */}
       {asking && <PodmanGoAhead asking={goAhead} />}
+      {pauseOffer && <PausePodman key={pauseOffer} offer={pauseOffer} />}
+      {/* Not while setup's failure is shown: the install that brings the engine up has stopped,
+          and a spinner saying it is coming waited forever under it. Its Try again starts it. */}
       {waitingForEngine
-        ? !behind && (
+        ? !behind &&
+          !failure && (
             <StatusLine>
               {engine ?? handOff ?? "Preparing this computer…"}
             </StatusLine>
           )
         : handOff && !behind && <StatusLine>{handOff}</StatusLine>}
       {seen.at === "checking" && !handOff && !asking && (
-        <StatusLine>Checking your CopilotKit account…</StatusLine>
+        <StatusLine>Checking your OpenBot account…</StatusLine>
       )}
       {seen.at === "signing-in" && (
         <CopilotKitSignInWait
           attempt={seen.attempt}
-          before="Checking your CopilotKit account…"
-          waiting="Finish signing in to CopilotKit in your browser…"
+          before="Checking your OpenBot account…"
+          waiting="Finish signing in to OpenBot in your browser…"
+          onPage={() => setSignInPage(true)}
           onCancel={cancelSignIn}
         />
       )}
@@ -399,53 +535,60 @@ export function CopilotKitAccount({
       )}
       {failure}
 
-      <div className="row">
-        {seen.at === "signed-out" && (
-          <button type="button" onClick={signIn}>
-            Sign in to CopilotKit
-          </button>
-        )}
-        {agreement && (
-          <button type="button" onClick={() => connectApps(agreement.version)}>
-            Accept
-          </button>
-        )}
-        {seen.at === "apps-failed" && (
-          <>
-            <button type="button" onClick={() => connectApps(seen.version)}>
-              Connect apps
+      {/* The step's actions and the background install, pinned in view (`StepFooter`). */}
+      <StepFooter>
+        <div className="row">
+          {seen.at === "signed-out" && (
+            <button type="button" onClick={signIn}>
+              Sign in for a free local license key
             </button>
+          )}
+          {agreement && (
             <button
               type="button"
-              className="quiet"
-              onClick={() => finish(seen.version)}
+              onClick={() => connectApps(agreement.version)}
             >
-              Continue
+              Accept
             </button>
-          </>
-        )}
-        {seen.at === "failed" && (
-          <button
-            type="button"
-            onClick={() => (seen.retry === "sign-in" ? signIn() : check())}
-          >
-            Try again
-          </button>
-        )}
-        {refused && (
-          <button type="button" onClick={check}>
-            Try again
-          </button>
-        )}
-      </div>
-      {/* Last, under whatever the step asks: OpenBot is still installing meanwhile. */}
-      {behind !== undefined && (
-        <BehindSlot>
-          {behind && (
-            <SetupProgress steps={[behind]} label="Background install" />
           )}
-        </BehindSlot>
-      )}
+          {seen.at === "apps-failed" && (
+            <>
+              <button type="button" onClick={() => connectApps(seen.version)}>
+                Connect apps
+              </button>
+              <button
+                type="button"
+                className="quiet"
+                onClick={() => finish(seen.version)}
+              >
+                Continue
+              </button>
+            </>
+          )}
+          {/* One Try again: setup's failure card has its own, which asks this again too. */}
+          {seen.at === "failed" && !failure && (
+            <button
+              type="button"
+              onClick={() => (seen.retry === "sign-in" ? signIn() : check())}
+            >
+              Try again
+            </button>
+          )}
+          {refused && !failure && (
+            <button type="button" onClick={check}>
+              Try again
+            </button>
+          )}
+        </div>
+        {/* Last, under whatever the step asks: OpenBot is still installing meanwhile. */}
+        {behind !== undefined && (
+          <BehindSlot>
+            {behindRow && (
+              <SetupProgress steps={[behindRow]} label="Background install" />
+            )}
+          </BehindSlot>
+        )}
+      </StepFooter>
     </div>
   );
 }

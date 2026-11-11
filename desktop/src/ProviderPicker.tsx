@@ -7,7 +7,7 @@ import { isHttpEndpointUrl } from "./http-endpoint-url";
 import { ButtonMark, Mark } from "./Mark";
 import { asProblem, InlineFailure, type Problem } from "./Problem";
 import { Sections } from "./Sections";
-import { StatusLine } from "./SetupProgress";
+import { StatusLine, StepFooter } from "./SetupProgress";
 
 export type Login = "plan" | "api-key" | "endpoint" | "oauth";
 
@@ -1053,7 +1053,9 @@ export function ProviderPicker({
           {/* Said before it happens rather than diagnosed after the Bots stop answering. */}
           {failure && <InlineFailure problem={failure} />}
 
-          {row.caution && (
+          {/* About a plan's own pool of use, so said only where the person signs in with one. On
+              Windows G it sat under "Anthropic API key", where it does not apply. */}
+          {row.caution && login === "plan" && (
             <p className="caution">
               {row.caution.says}{" "}
               <a
@@ -1070,28 +1072,32 @@ export function ProviderPicker({
 
       {setupFailure}
 
-      <div className="row">
-        {onBack && (
+      {/* The step's actions and what runs behind it, pinned to the bottom of the card's view
+          (`StepFooter`): Continue is always there to press, with the choice scrolling above it. */}
+      <StepFooter>
+        <div className="row">
+          {onBack && (
+            <button
+              type="button"
+              className="quiet"
+              onClick={onBack}
+              disabled={starting}
+            >
+              Back
+            </button>
+          )}
           <button
             type="button"
-            className="quiet"
-            onClick={onBack}
-            disabled={starting}
+            disabled={starting || !row || !login || !ready}
+            onClick={continueWithChoice}
           >
-            Back
+            Continue
           </button>
-        )}
-        <button
-          type="button"
-          disabled={starting || !row || !login || !ready}
-          onClick={continueWithChoice}
-        >
-          Continue
-        </button>
-      </div>
-      {/* Under the form, never above it: what runs behind this step comes and goes while the
+        </div>
+        {/* Under the form, never above it: what runs behind this step comes and goes while the
           person types here, and nothing above the fields may move. See `BehindSlot`. */}
-      {status}
+        {status}
+      </StepFooter>
     </div>
   );
 }

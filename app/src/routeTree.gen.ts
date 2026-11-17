@@ -10,10 +10,11 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthedRouteImport } from './routes/_authed'
+import { Route as ConnectingRouteImport } from './routes/connecting'
+import { Route as DesktopReturnRouteImport } from './routes/desktop-return'
 import { Route as SignRouteImport } from './routes/sign'
 import { Route as AuthedAppRouteImport } from './routes/_authed/_app'
 import { Route as AuthedAdminRouteRouteImport } from './routes/_authed/admin/route'
-import { Route as AuthedDesktopReturnRouteImport } from './routes/_authed/desktop-return'
 import { Route as AuthedOnboardingRouteImport } from './routes/_authed/onboarding'
 import { Route as AuthedSettingsRouteRouteImport } from './routes/_authed/settings/route'
 import { Route as AuthedAppIndexRouteImport } from './routes/_authed/_app/index'
@@ -107,6 +108,7 @@ import { Route as AuthedSettingsCredentialsNewRouteImport } from './routes/_auth
 import { Route as AuthedAppBotsAgentIdIndexRouteImport } from './routes/_authed/_app/bots.$agentId.index'
 import { Route as AuthedAppBotsAgentIdAccessRouteImport } from './routes/_authed/_app/bots.$agentId.access'
 import { Route as AuthedAppBotsAgentIdActivityRouteImport } from './routes/_authed/_app/bots.$agentId.activity'
+import { Route as AuthedAppBotsAgentIdAgentsRouteImport } from './routes/_authed/_app/bots.$agentId.agents'
 import { Route as AuthedAppBotsAgentIdApprovalsRouteImport } from './routes/_authed/_app/bots.$agentId.approvals'
 import { Route as AuthedAppBotsAgentIdAppsRouteImport } from './routes/_authed/_app/bots.$agentId.apps'
 import { Route as AuthedAppBotsAgentIdComputerRouteImport } from './routes/_authed/_app/bots.$agentId.computer'
@@ -135,6 +137,16 @@ const AuthedRoute = AuthedRouteImport.update({
   id: '/_authed',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConnectingRoute = ConnectingRouteImport.update({
+  id: '/connecting',
+  path: '/connecting',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DesktopReturnRoute = DesktopReturnRouteImport.update({
+  id: '/desktop-return',
+  path: '/desktop-return',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignRoute = SignRouteImport.update({
   id: '/sign',
   path: '/sign',
@@ -147,11 +159,6 @@ const AuthedAppRoute = AuthedAppRouteImport.update({
 const AuthedAdminRouteRoute = AuthedAdminRouteRouteImport.update({
   id: '/admin',
   path: '/admin',
-  getParentRoute: () => AuthedRoute,
-} as any)
-const AuthedDesktopReturnRoute = AuthedDesktopReturnRouteImport.update({
-  id: '/desktop-return',
-  path: '/desktop-return',
   getParentRoute: () => AuthedRoute,
 } as any)
 const AuthedOnboardingRoute = AuthedOnboardingRouteImport.update({
@@ -650,6 +657,12 @@ const AuthedAppBotsAgentIdActivityRoute =
     path: '/bots/$agentId/activity',
     getParentRoute: () => AuthedAppRoute,
   } as any)
+const AuthedAppBotsAgentIdAgentsRoute =
+  AuthedAppBotsAgentIdAgentsRouteImport.update({
+    id: '/bots/$agentId/agents',
+    path: '/bots/$agentId/agents',
+    getParentRoute: () => AuthedAppRoute,
+  } as any)
 const AuthedAppBotsAgentIdApprovalsRoute =
   AuthedAppBotsAgentIdApprovalsRouteImport.update({
     id: '/bots/$agentId/approvals',
@@ -791,10 +804,11 @@ const AuthedAdminPluginsKeyToolsToolRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthedAppIndexRoute
+  '/connecting': typeof ConnectingRoute
+  '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
   '/admin': typeof AuthedAdminRouteRouteWithChildren
   '/settings': typeof AuthedSettingsRouteRouteWithChildren
-  '/desktop-return': typeof AuthedDesktopReturnRoute
   '/onboarding': typeof AuthedOnboardingRoute
   '/approvals': typeof AuthedAppApprovalsRoute
   '/bot': typeof AuthedAppBotRoute
@@ -884,6 +898,7 @@ export interface FileRoutesByFullPath {
   '/settings/connected-accounts/': typeof AuthedSettingsConnectedAccountsIndexRoute
   '/bots/$agentId/access': typeof AuthedAppBotsAgentIdAccessRoute
   '/bots/$agentId/activity': typeof AuthedAppBotsAgentIdActivityRoute
+  '/bots/$agentId/agents': typeof AuthedAppBotsAgentIdAgentsRoute
   '/bots/$agentId/approvals': typeof AuthedAppBotsAgentIdApprovalsRoute
   '/bots/$agentId/apps': typeof AuthedAppBotsAgentIdAppsRoute
   '/bots/$agentId/computer': typeof AuthedAppBotsAgentIdComputerRoute
@@ -911,8 +926,9 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof AuthedAppIndexRoute
+  '/connecting': typeof ConnectingRoute
+  '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
-  '/desktop-return': typeof AuthedDesktopReturnRoute
   '/onboarding': typeof AuthedOnboardingRoute
   '/approvals': typeof AuthedAppApprovalsRoute
   '/bot': typeof AuthedAppBotRoute
@@ -1002,6 +1018,7 @@ export interface FileRoutesByTo {
   '/settings/connected-accounts': typeof AuthedSettingsConnectedAccountsIndexRoute
   '/bots/$agentId/access': typeof AuthedAppBotsAgentIdAccessRoute
   '/bots/$agentId/activity': typeof AuthedAppBotsAgentIdActivityRoute
+  '/bots/$agentId/agents': typeof AuthedAppBotsAgentIdAgentsRoute
   '/bots/$agentId/approvals': typeof AuthedAppBotsAgentIdApprovalsRoute
   '/bots/$agentId/apps': typeof AuthedAppBotsAgentIdAppsRoute
   '/bots/$agentId/computer': typeof AuthedAppBotsAgentIdComputerRoute
@@ -1030,11 +1047,12 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authed': typeof AuthedRouteWithChildren
+  '/connecting': typeof ConnectingRoute
+  '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
   '/_authed/admin': typeof AuthedAdminRouteRouteWithChildren
   '/_authed/settings': typeof AuthedSettingsRouteRouteWithChildren
   '/_authed/_app': typeof AuthedAppRouteWithChildren
-  '/_authed/desktop-return': typeof AuthedDesktopReturnRoute
   '/_authed/onboarding': typeof AuthedOnboardingRoute
   '/_authed/_app/approvals': typeof AuthedAppApprovalsRoute
   '/_authed/_app/bot': typeof AuthedAppBotRoute
@@ -1126,6 +1144,7 @@ export interface FileRoutesById {
   '/_authed/settings/connected-accounts/': typeof AuthedSettingsConnectedAccountsIndexRoute
   '/_authed/_app/bots/$agentId/access': typeof AuthedAppBotsAgentIdAccessRoute
   '/_authed/_app/bots/$agentId/activity': typeof AuthedAppBotsAgentIdActivityRoute
+  '/_authed/_app/bots/$agentId/agents': typeof AuthedAppBotsAgentIdAgentsRoute
   '/_authed/_app/bots/$agentId/approvals': typeof AuthedAppBotsAgentIdApprovalsRoute
   '/_authed/_app/bots/$agentId/apps': typeof AuthedAppBotsAgentIdAppsRoute
   '/_authed/_app/bots/$agentId/computer': typeof AuthedAppBotsAgentIdComputerRoute
@@ -1155,10 +1174,11 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/connecting'
+    | '/desktop-return'
     | '/sign'
     | '/admin'
     | '/settings'
-    | '/desktop-return'
     | '/onboarding'
     | '/approvals'
     | '/bot'
@@ -1248,6 +1268,7 @@ export interface FileRouteTypes {
     | '/settings/connected-accounts/'
     | '/bots/$agentId/access'
     | '/bots/$agentId/activity'
+    | '/bots/$agentId/agents'
     | '/bots/$agentId/approvals'
     | '/bots/$agentId/apps'
     | '/bots/$agentId/computer'
@@ -1275,8 +1296,9 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/sign'
+    | '/connecting'
     | '/desktop-return'
+    | '/sign'
     | '/onboarding'
     | '/approvals'
     | '/bot'
@@ -1366,6 +1388,7 @@ export interface FileRouteTypes {
     | '/settings/connected-accounts'
     | '/bots/$agentId/access'
     | '/bots/$agentId/activity'
+    | '/bots/$agentId/agents'
     | '/bots/$agentId/approvals'
     | '/bots/$agentId/apps'
     | '/bots/$agentId/computer'
@@ -1393,11 +1416,12 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_authed'
+    | '/connecting'
+    | '/desktop-return'
     | '/sign'
     | '/_authed/admin'
     | '/_authed/settings'
     | '/_authed/_app'
-    | '/_authed/desktop-return'
     | '/_authed/onboarding'
     | '/_authed/_app/approvals'
     | '/_authed/_app/bot'
@@ -1489,6 +1513,7 @@ export interface FileRouteTypes {
     | '/_authed/settings/connected-accounts/'
     | '/_authed/_app/bots/$agentId/access'
     | '/_authed/_app/bots/$agentId/activity'
+    | '/_authed/_app/bots/$agentId/agents'
     | '/_authed/_app/bots/$agentId/approvals'
     | '/_authed/_app/bots/$agentId/apps'
     | '/_authed/_app/bots/$agentId/computer'
@@ -1517,6 +1542,8 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AuthedRoute: typeof AuthedRouteWithChildren
+  ConnectingRoute: typeof ConnectingRoute
+  DesktopReturnRoute: typeof DesktopReturnRoute
   SignRoute: typeof SignRoute
 }
 
@@ -1527,6 +1554,20 @@ declare module '@tanstack/react-router' {
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AuthedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/connecting': {
+      id: '/connecting'
+      path: '/connecting'
+      fullPath: '/connecting'
+      preLoaderRoute: typeof ConnectingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/desktop-return': {
+      id: '/desktop-return'
+      path: '/desktop-return'
+      fullPath: '/desktop-return'
+      preLoaderRoute: typeof DesktopReturnRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sign': {
@@ -1548,13 +1589,6 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AuthedAdminRouteRouteImport
-      parentRoute: typeof AuthedRoute
-    }
-    '/_authed/desktop-return': {
-      id: '/_authed/desktop-return'
-      path: '/desktop-return'
-      fullPath: '/desktop-return'
-      preLoaderRoute: typeof AuthedDesktopReturnRouteImport
       parentRoute: typeof AuthedRoute
     }
     '/_authed/onboarding': {
@@ -2208,6 +2242,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedAppBotsAgentIdActivityRouteImport
       parentRoute: typeof AuthedAppRoute
     }
+    '/_authed/_app/bots/$agentId/agents': {
+      id: '/_authed/_app/bots/$agentId/agents'
+      path: '/bots/$agentId/agents'
+      fullPath: '/bots/$agentId/agents'
+      preLoaderRoute: typeof AuthedAppBotsAgentIdAgentsRouteImport
+      parentRoute: typeof AuthedAppRoute
+    }
     '/_authed/_app/bots/$agentId/approvals': {
       id: '/_authed/_app/bots/$agentId/approvals'
       path: '/bots/$agentId/approvals'
@@ -2565,6 +2606,7 @@ interface AuthedAppRouteChildren {
   AuthedAppInvitationsIndexRoute: typeof AuthedAppInvitationsIndexRoute
   AuthedAppBotsAgentIdAccessRoute: typeof AuthedAppBotsAgentIdAccessRoute
   AuthedAppBotsAgentIdActivityRoute: typeof AuthedAppBotsAgentIdActivityRoute
+  AuthedAppBotsAgentIdAgentsRoute: typeof AuthedAppBotsAgentIdAgentsRoute
   AuthedAppBotsAgentIdApprovalsRoute: typeof AuthedAppBotsAgentIdApprovalsRoute
   AuthedAppBotsAgentIdAppsRoute: typeof AuthedAppBotsAgentIdAppsRoute
   AuthedAppBotsAgentIdComputerRoute: typeof AuthedAppBotsAgentIdComputerRoute
@@ -2620,6 +2662,7 @@ const AuthedAppRouteChildren: AuthedAppRouteChildren = {
   AuthedAppInvitationsIndexRoute: AuthedAppInvitationsIndexRoute,
   AuthedAppBotsAgentIdAccessRoute: AuthedAppBotsAgentIdAccessRoute,
   AuthedAppBotsAgentIdActivityRoute: AuthedAppBotsAgentIdActivityRoute,
+  AuthedAppBotsAgentIdAgentsRoute: AuthedAppBotsAgentIdAgentsRoute,
   AuthedAppBotsAgentIdApprovalsRoute: AuthedAppBotsAgentIdApprovalsRoute,
   AuthedAppBotsAgentIdAppsRoute: AuthedAppBotsAgentIdAppsRoute,
   AuthedAppBotsAgentIdComputerRoute: AuthedAppBotsAgentIdComputerRoute,
@@ -2653,7 +2696,6 @@ interface AuthedRouteChildren {
   AuthedAdminRouteRoute: typeof AuthedAdminRouteRouteWithChildren
   AuthedSettingsRouteRoute: typeof AuthedSettingsRouteRouteWithChildren
   AuthedAppRoute: typeof AuthedAppRouteWithChildren
-  AuthedDesktopReturnRoute: typeof AuthedDesktopReturnRoute
   AuthedOnboardingRoute: typeof AuthedOnboardingRoute
   AuthedSignInRequestIdRoute: typeof AuthedSignInRequestIdRoute
 }
@@ -2662,7 +2704,6 @@ const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedAdminRouteRoute: AuthedAdminRouteRouteWithChildren,
   AuthedSettingsRouteRoute: AuthedSettingsRouteRouteWithChildren,
   AuthedAppRoute: AuthedAppRouteWithChildren,
-  AuthedDesktopReturnRoute: AuthedDesktopReturnRoute,
   AuthedOnboardingRoute: AuthedOnboardingRoute,
   AuthedSignInRequestIdRoute: AuthedSignInRequestIdRoute,
 }
@@ -2672,6 +2713,8 @@ const AuthedRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   AuthedRoute: AuthedRouteWithChildren,
+  ConnectingRoute: ConnectingRoute,
+  DesktopReturnRoute: DesktopReturnRoute,
   SignRoute: SignRoute,
 }
 export const routeTree = rootRouteImport

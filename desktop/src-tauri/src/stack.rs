@@ -86,8 +86,8 @@ fn installation_uses(folder: &Path, service: &str) -> bool {
 }
 
 /// The services Start raises for the installation in `root`: [`SERVICES`], the `worker` its own
-/// Compose file uses, if it does (`installation_uses`), the Bot the person picked, and on a
-/// ChatGPT plan the service that holds the plan's model transport (`chatgpt_plan_runs`).
+/// Compose file uses, if it does (`installation_uses`), the Bot the person picked, and the engine of
+/// the plan the installation runs on, if it does (`plan_engine`).
 pub fn selected_services(root: &Path, harness: bool) -> Vec<&'static str> {
     let mut services = SERVICES.to_vec();
     if installation_uses(root, WORKER) {
@@ -95,33 +95,34 @@ pub fn selected_services(root: &Path, harness: bool) -> Vec<&'static str> {
     }
     if harness {
         services.push("agent-harness");
-        if chatgpt_plan_runs(root) {
-            services.push(crate::plan::CHATGPT_PLAN_SERVICE);
-        }
+    }
+    if let Some(plan) = plan_engine(root) {
+        services.push(plan.service);
     }
     services
 }
 
 /**
-Whether the installation in `root` runs the ChatGPT plan's model service beside its Bot.
+The engine of the plan the installation in `root` runs on: the Claude plan's, or the ChatGPT plan's,
+which holds the plan's model transport for the Bot and the server's own Bots. None on any other
+connection, so every other installation runs one Bot image, not two.
 
-Read from what the start before Compose wrote: `.env` names the service's address only on a ChatGPT
-plan (`crate::env::compose`), and empties it on any other answer. Read from the file rather than
-passed in so every path that raises the stack (Start, a restart, an update's start) asks the same
-question and gets the same answer. Only where the installation's own Compose file defines the
-service: an update that rolled back may have a file that does not, and Compose refuses a name its
-file does not define.
+Read from the connection recorded beside the installation, which Start records before Compose runs
+and a change in the app records too (`saved_intent`), so every path that raises the stack (Start, a
+restart, an update's start) asks the same question and gets the same answer. Only where the
+installation's own Compose file defines the service: an update that rolled back may have a file
+that does not, and Compose refuses a name its file does not define.
 */
-fn chatgpt_plan_runs(root: &Path) -> bool {
-    let named = crate::env::already_set(&root.join(".env"), &["CHATGPT_PLAN_HARNESS_URL"]);
-    named
-        .get("CHATGPT_PLAN_HARNESS_URL")
-        .is_some_and(|url| !url.trim().is_empty())
-        && std::fs::read_to_string(root.join("docker-compose.yml")).is_ok_and(|text| {
+pub fn plan_engine(root: &Path) -> Option<Alone> {
+    let plan = crate::ai_connection::Plan::of(crate::saved_intent::SavedIntent::read(root).model?)?;
+    let alone = plan.alone();
+    std::fs::read_to_string(root.join("docker-compose.yml"))
+        .is_ok_and(|text| {
             compose_service_names(&text)
                 .iter()
-                .any(|name| name == crate::plan::CHATGPT_PLAN_SERVICE)
+                .any(|name| name == alone.service)
         })
+        .then_some(alone)
 }
 
 /// [`selected_services`] and the one-shot `migrate`, where the file uses it: every service whose
@@ -1468,6 +1469,110 @@ pub fn up(
     })
 }
 
+/// A service behind a profile of its own, which OpenBot starts and stops alone: a plan's engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Alone {
+    pub profile: &'static str,
+    pub service: &'static str,
+}
+
+/**
+Start one service alone, and wait until it answers its health check, while everything else keeps
+running: the server, the database and every other Bot keep their containers. A service already
+running with the same settings is left as it is; one whose settings changed (a new plan token) is
+recreated. `--no-deps`, so nothing it might depend on is touched either.
+
+How a plan's engine starts the moment somebody signs in to the plan in the app.
+*/
+pub fn start_alone(
+    engine: &Address,
+    root: &Path,
+    alone: Alone,
+    secrets: &Secrets,
+) -> Result<(), Problem> {
+    crate::logging::timed("compose up one service", || {
+        let output = compose_command(engine, root, secrets)
+            .args(["--profile", alone.profile])
+            .args(["up", "-d", "--no-deps", "--no-build", "--pull", "never"])
+            .args(["--wait", "--wait-timeout", ALONE_PATIENCE])
+            .arg(alone.service)
+            .output()
+            .map_err(|error| {
+                Problem::with(
+                    "OpenBot couldn't start your plan. Try again.",
+                    format!("could not run {} compose: {error}", engine.engine.binary()),
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let raw = command_said(&output.stderr);
+        Err(Problem::with(crate::problem::said_about(&raw), raw))
+    })
+}
+
+/// How long [`start_alone`] and [`recreate_harness`] wait for the service's health check, in
+/// seconds. A plan's engine answers in seconds once its image is on the computer.
+const ALONE_PATIENCE: &str = "180";
+
+/**
+Recreate the picked harness alone, with the settings now in `.env`, and nothing else: a harness that
+fixes its provider when it starts has to start again to speak the new connection's wire. With the
+harness port overlay `up` uses, so it keeps its port.
+*/
+pub fn recreate_harness(engine: &Address, root: &Path, secrets: &Secrets) -> Result<(), Problem> {
+    crate::logging::timed("compose recreate the picked Bot", || {
+        let mut command = compose_start_command(engine, root, secrets, std::env::consts::OS)?;
+        let output = command
+            .args(["--profile", "harness"])
+            .args(["up", "-d", "--no-deps", "--no-build", "--pull", "never"])
+            .args([
+                "--force-recreate",
+                "--wait",
+                "--wait-timeout",
+                ALONE_PATIENCE,
+            ])
+            .arg("agent-harness")
+            .output()
+            .map_err(|error| {
+                Problem::with(
+                    "OpenBot couldn't restart your Bot. Try again.",
+                    format!("could not run {} compose: {error}", engine.engine.binary()),
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let raw = command_said(&output.stderr);
+        Err(Problem::with(crate::problem::said_about(&raw), raw))
+    })
+}
+
+/// Stop and remove one service alone, if it runs, and nothing else. One that is not running is
+/// already where this leaves it.
+pub fn remove_alone(engine: &Address, root: &Path, alone: Alone) -> Result<(), Problem> {
+    crate::logging::timed("compose remove one service", || {
+        let output = compose_command(engine, root, &Secrets::new())
+            .args(["--profile", alone.profile])
+            .args(["rm", "--stop", "--force", alone.service])
+            .output()
+            .map_err(|error| {
+                Problem::with(
+                    "OpenBot couldn't stop a plan it no longer uses.",
+                    format!("could not run {} compose: {error}", engine.engine.binary()),
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let raw = command_said(&output.stderr);
+        Err(Problem::with(
+            "OpenBot couldn't stop a plan it no longer uses.",
+            raw,
+        ))
+    })
+}
+
 /**
 Make the sign-in folder Compose bind-mounts into the server, as the person.
 
@@ -1678,8 +1783,11 @@ fn up_now(
      * it: its image comes from `.env`, and with nothing picked it is a stand-in docker-compose.yml
      * names so older Compose will read the file at all. The flag comes before
      * `up`, because `--profile` is an option of `compose` itself and not of the subcommand.
+     *
+     * A plan's engine the same way, behind its own profile.
      */
     let requested = selected_services(root, harness);
+    let plan = plan_engine(root);
     // Before anything is raised: a routines sweep an earlier release left must not run beside a
     // server that does that work itself.
     remove_retired_containers(engine, root).map_err(|detail| {
@@ -1691,6 +1799,9 @@ fn up_now(
     let mut command = compose_start_command(engine, root, secrets, std::env::consts::OS)?;
     if harness {
         command.args(["--profile", "harness"]);
+    }
+    if let Some(plan) = plan {
+        command.args(["--profile", plan.profile]);
     }
     let output = command
         .args(["up", "-d", "--no-build", "--pull", "never"])
@@ -1770,15 +1881,14 @@ fn computer_namespace(engine: &Address, root: &Path) -> Result<Option<String>, S
 /// screen to stop it from. Stopped rather than removed, because the supervisor starts an existing
 /// owned container back up and the Bot keeps the profile and workspace volumes attached to it.
 /// Quiesce the supervisor before listing so in-flight creates and restarts are included.
-/// Returns false only when the selected root has no installed deployment to take down.
-pub fn stop_computers(engine: &Address, root: &Path) -> Result<bool, String> {
-    crate::logging::timed("stop Bots' computers", || stop_computers_now(engine, root))
+/// `namespace` is the one `computer_namespace` resolved for this deployment.
+fn stop_computers(engine: &Address, root: &Path, namespace: &str) -> Result<(), String> {
+    crate::logging::timed("stop Bots' computers", || {
+        stop_computers_now(engine, root, namespace)
+    })
 }
 
-fn stop_computers_now(engine: &Address, root: &Path) -> Result<bool, String> {
-    let Some(namespace) = computer_namespace(engine, root)? else {
-        return Ok(false);
-    };
+fn stop_computers_now(engine: &Address, root: &Path, namespace: &str) -> Result<(), String> {
     // Validate ownership before stopping anything, then wait for the creator to exit. A list taken
     // while the supervisor is active can miss a new computer or one it restarts after being stopped.
     let supervisor = compose_command(engine, root, &Secrets::new())
@@ -1815,7 +1925,7 @@ fn stop_computers_now(engine: &Address, root: &Path) -> Result<bool, String> {
         .map(str::to_string)
         .collect();
     if running.is_empty() {
-        return Ok(true);
+        return Ok(());
     }
 
     let stopped = engine
@@ -1825,17 +1935,66 @@ fn stop_computers_now(engine: &Address, root: &Path) -> Result<bool, String> {
         .output()
         .map_err(|error| format!("could not stop the Bots' computers: {error}"))?;
     if stopped.status.success() {
-        return Ok(true);
+        return Ok(());
     }
     Err(command_said(&stopped.stderr))
 }
 
+/// How long Compose gives the server to stop before it kills it, in seconds.
+///
+/// Asked to stop, the server finishes what it is doing: it waits for the requests in flight and the
+/// Bots' answers under way (six seconds at most, outside a cluster), stops an answer still going the
+/// way a person's Stop does (two and a half), and closes its sockets. Compose's own ten would kill a
+/// server still at that. Fifteen covers it, and a server with nothing to finish leaves at once.
+pub const SERVER_STOP_SECONDS: &str = "15";
+
+/// Stop the server on its own, before anything it is using.
+///
+/// FOUND ON DESKTOP. `compose down` stops every container at once, so a Bot's harness went away while
+/// the server was finishing the answer the Bot was giving, and the answer ended in "Couldn't reach"
+/// the Bot. The server finishes its answers when it is asked to stop, and it can only do that while
+/// the Bots, their computers and the database are still there. A failure here is logged and the rest
+/// is still stopped: `compose down` stops the server too.
+fn stop_server_first(engine: &Address, root: &Path) {
+    if !root.join("docker-compose.yml").is_file() {
+        return;
+    }
+    let stopped = crate::logging::timed("stop the server", || {
+        let output = compose_command(engine, root, &Secrets::new())
+            .args([
+                "-f",
+                "docker-compose.yml",
+                "--profile",
+                OPENBOT_PROFILE,
+                "stop",
+                "--timeout",
+                SERVER_STOP_SECONDS,
+                "server",
+            ])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(command_said(&output.stderr))
+        }
+    });
+    if let Err(error) = stopped {
+        log::warn!("[compose down] could not stop the server first: {error}");
+    }
+}
+
 pub fn down(engine: &Address, root: &Path) -> Result<(), String> {
     crate::logging::timed("compose down", || {
-        // Stop the supervisor and its runtime-created computers before removing the Compose stack.
-        if !stop_computers(engine, root)? {
+        // Which computers are this deployment's is settled before anything is stopped: a namespace
+        // that can't be resolved stops nothing, and no installed deployment has nothing to take down.
+        let Some(namespace) = computer_namespace(engine, root)? else {
             return Ok(());
-        }
+        };
+        // The server first, so it can finish what it is doing with everything it uses still there.
+        stop_server_first(engine, root);
+        // Stop the supervisor and its runtime-created computers before removing the Compose stack.
+        stop_computers(engine, root, &namespace)?;
 
         /*
          * WITH THE PROFILE, OR THE PICKED BOT KEEPS RUNNING.
@@ -3446,8 +3605,40 @@ pub const REFUSAL_FILE: &str = "refusal";
 
 /// Take away the sentence an earlier start's server wrote, before Compose starts this one, so only a
 /// refusal from this start is read (`server_refusal`).
-pub fn forget_refusal(root: &Path) {
+///
+/// FIRST, THE SERVER THAT WROTE IT. The engine keeps restarting a refusing server until Compose
+/// replaces it, and each restart refuses again and writes the old sentence again. Under Podman that
+/// is every second or so, so a Retry after the setting was put right read the old server's sentence,
+/// written after the file was taken away and before `up` replaced the container, although the new
+/// server was healthy. So a server that refused is stopped and removed first, and nothing is left
+/// that could write the file: it serves nothing, and `up` makes it again from the settings as they
+/// are now.
+///
+/// Removed rather than told apart by when the file was written or by whom: the file's time comes
+/// from the host and the container's start time from the engine's own machine, which under Podman
+/// on Windows or macOS is a virtual machine with a clock of its own, and naming the container in the
+/// file would need every server image to write it.
+pub fn forget_refusal(engine: &Address, root: &Path) {
     let file = root.join(".openbot").join(REFUSAL_FILE);
+    // The file there at all is a server that refused, even caught half written: a server empties
+    // it before it writes its sentence, every time the engine restarts it.
+    if file.exists() || engine_reports_refusal(engine, root) {
+        let removed = compose_command(engine, root, &Secrets::new())
+            .args(["rm", "--stop", "--force", "server"])
+            .output();
+        match removed {
+            Ok(out) if out.status.success() => {
+                log::info!("[start] removed the server that refused to start")
+            }
+            Ok(out) => log::warn!(
+                "[start] could not remove the server that refused to start: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(error) => {
+                log::warn!("[start] could not remove the server that refused to start: {error}")
+            }
+        }
+    }
     if let Err(error) = std::fs::remove_file(&file) {
         if error.kind() != std::io::ErrorKind::NotFound {
             log::warn!("[start] could not remove {}: {error}", file.display());
@@ -3481,12 +3672,7 @@ pub fn server_refusal(engine: &Address, root: &Path) -> Option<String> {
     if let Some(said) = refusal_written(root) {
         return Some(said);
     }
-    let listing = compose_command(engine, root, &Secrets::new())
-        .args(["ps", "-a", "--format", "json", "server"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())?;
-    let container = refused_server_in(&String::from_utf8_lossy(&listing.stdout))?;
+    let container = refused_server(engine, root)?;
     // The container's own log, not Compose's: Compose merges stdout and stderr into one stream, and
     // a server restarted under `unless-stopped` has already written the next attempt's stdout
     // after the sentence. The engine keeps the two apart.
@@ -3506,6 +3692,22 @@ pub fn server_refusal(engine: &Address, root: &Path) -> Option<String> {
         String::new()
     };
     Some(refusal_sentence_in(&stderr, &compose_log))
+}
+
+/// The id of the `server` container whose last exit was [`SERVER_REFUSED_TO_START`], as the engine
+/// reports it now. `None` too when the engine can't be asked.
+fn refused_server(engine: &Address, root: &Path) -> Option<String> {
+    let listing = compose_command(engine, root, &Secrets::new())
+        .args(["ps", "-a", "--format", "json", "server"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    refused_server_in(&String::from_utf8_lossy(&listing.stdout))
+}
+
+/// Whether the engine itself says the server refused, for a server that could not write the file.
+fn engine_reports_refusal(engine: &Address, root: &Path) -> bool {
+    refused_server(engine, root).is_some()
 }
 
 /// The id of the `server` container whose last exit was [`SERVER_REFUSED_TO_START`], from
@@ -3826,23 +4028,43 @@ fn setting_in(environment: &[u8], name: &str) -> Result<Option<String>, String> 
 
 /**
 Restart OpenBot itself and leave everything else running: the server, and the worker where the
-installation's Compose file uses one.
+installation's Compose file uses one, made again from `.env` and `secrets`, the environment Start
+hands Compose (`compose_environment` in main.rs), so a setting changed in `.env` since Start
+reaches the server.
 
-What the Status window's Restart did to the host processes, now done by the engine that runs them:
-the database and the Bots stay up, so nothing is lost and it takes seconds. The profile is named
-because the services sit behind it, and Compose refuses to restart a service it cannot see, as it
-refuses one its file does not define.
+Not Compose's `restart`, which this used to be: it keeps each container exactly as it was made, and
+Compose documents that a restart applies no change to the configuration or environment. A container
+gets `.env` when it is created, so this one is created again, with `up --force-recreate`, which is
+how `up` applies a change and also restarts a server whose settings did not change. `--no-deps`
+leaves the database, the computer and the Bots running, so nothing is lost and it takes seconds.
+Built as Start builds its `up` (`compose_start_command`), with the same overlays, and never pulls or
+builds.
 
 Never the `worker` of a file that says its server does the scheduled work: nothing in that release
 starts it, so there is none to restart.
 */
-pub fn restart_openbot(engine: &Address, root: &Path) -> Result<(), String> {
-    crate::logging::timed("compose restart", || restart_openbot_now(engine, root))
+pub fn recreate_openbot(engine: &Address, root: &Path, secrets: &Secrets) -> Result<(), String> {
+    crate::logging::timed("compose recreate", || {
+        recreate_openbot_now(engine, root, secrets)
+    })
 }
 
-fn restart_openbot_now(engine: &Address, root: &Path) -> Result<(), String> {
-    let output = compose_command(engine, root, &Secrets::new())
-        .args(["--profile", OPENBOT_PROFILE, "restart", "server"])
+fn recreate_openbot_now(engine: &Address, root: &Path, secrets: &Secrets) -> Result<(), String> {
+    let output = compose_start_command(engine, root, secrets, std::env::consts::OS)
+        .map_err(|problem| match problem.detail {
+            Some(detail) => format!("{} {detail}", problem.said),
+            None => problem.said,
+        })?
+        .args([
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "--no-build",
+            "--pull",
+            "never",
+            "server",
+        ])
         .args(installation_uses(root, WORKER).then_some(WORKER))
         .output()
         .map_err(|error| format!("could not restart OpenBot: {error}"))?;
@@ -4355,6 +4577,7 @@ pub fn answering_at(port: u16, path: &str) -> Option<String> {
 pub fn answering_within(port: u16, path: &str, patience: std::time::Duration) -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(patience)
+        .default_headers(crate::client_version::headers())
         .build()
         .ok()?;
     LOOPBACKS.iter().find_map(|host| {
@@ -4435,6 +4658,7 @@ pub fn wait_until_healthy_saying(
     );
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .default_headers(crate::client_version::headers())
         .build()
         .map_err(|error| {
             NotReady::NotAnswering(format!("could not ask OpenBot's services: {error}"))
@@ -6038,6 +6262,22 @@ fn main() {
         }
     }
 
+    /// Whether this fixture's own leaf still listens: the leaf alive, as itself, and its port on
+    /// 127.0.0.1, where it bound, answering. A port given back can be taken by any listener on the
+    /// computer at once, so something answering there afterwards says nothing about the leaf; a
+    /// leaf that is gone listens on nothing.
+    #[cfg(unix)]
+    fn leaf_listening(fixture: &UnixDescendantFixture) -> bool {
+        unix_process(fixture.leaf.pid)
+            .unwrap()
+            .is_some_and(|now| now.start == fixture.leaf.start)
+            && std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], fixture.port)),
+                std::time::Duration::from_millis(300),
+            )
+            .is_ok()
+    }
+
     #[cfg(unix)]
     impl Drop for UnixDescendantFixture {
         fn drop(&mut self) {
@@ -6053,13 +6293,10 @@ fn main() {
             let _ = self.parent.kill();
             let _ = self.parent.wait();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            while something_answers(self.port) && std::time::Instant::now() < deadline {
+            while leaf_listening(self) && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            assert!(
-                !something_answers(self.port),
-                "fixture listener was not cleaned"
-            );
+            assert!(!leaf_listening(self), "fixture listener was not cleaned");
             assert!(unix_process(self.parent.id()).unwrap().is_none());
             assert!(unix_process(self.leaf.pid).unwrap().is_none());
             std::fs::remove_dir_all(&self.root).unwrap();
@@ -6074,7 +6311,7 @@ fn main() {
             let result = stop_processes_under(&fixture.root);
             let parent = fixture.parent.try_wait().unwrap();
             let leaf = unix_process(fixture.leaf.pid).unwrap();
-            let listening = something_answers(fixture.port);
+            let listening = leaf_listening(&fixture);
             let retry = stop_processes_under(&fixture.root);
             eprintln!(
                 "{}",
@@ -6134,7 +6371,7 @@ fn main() {
         );
         // Retrying the durable record also handles ancestors left stopped by the failed attempt.
         assert!(stop_processes_under(&fixture.root).is_ok());
-        assert!(!something_answers(fixture.port));
+        assert!(!leaf_listening(&fixture));
         assert!(unix_process(fixture.leaf.pid).unwrap().is_none());
         assert_eq!(stop_processes_under(&fixture.root).unwrap(), 0);
         // Drop independently checks the retained instances and port before removing the fixture.
@@ -7146,6 +7383,20 @@ fn main() {
             if let Some(row) = rows.get(asked).or(rows.last()) { println!("{row}"); }
         } else if actual.first().map(String::as_str) == Some("logs") {
             eprint!("{}", std::fs::read_to_string(".fixture-server-stderr").unwrap_or_default());
+        } else if actual.first().map(String::as_str) == Some("compose") && actual.iter().any(|arg| arg == "rm") {
+            // `rm --stop` returns once the container is gone: the old server is told to stop, and
+            // the engine waits for it as an engine does, however long it takes. Past two minutes
+            // something is wrong: it says so, fails, and leaves `.fixture-rm-gave-up` for the test.
+            std::fs::write(".fixture-stop-server", "").unwrap();
+            let patience = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while std::path::Path::new(".fixture-old-server-alive").exists() {
+                if std::time::Instant::now() >= patience {
+                    std::fs::write(".fixture-rm-gave-up", "").unwrap();
+                    eprintln!("the old server was still running two minutes after it was told to stop");
+                    std::process::exit(1);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         return;
     }
@@ -7521,6 +7772,13 @@ fn main() {
             Some("compose") if actual.get(1).map(String::as_str) == Some("config") => {
                 if std::path::Path::new(".fixture-config-failure").exists() { std::process::exit(17); }
                 print!("{}", std::fs::read_to_string(".fixture-config").unwrap());
+            }
+            Some("compose")
+                if actual == ["compose", "--profile", "openbot", "stop", "--timeout", "15", "server"] => {
+                if root.join(".fixture-server-stop-failure").exists() {
+                    eprintln!("fixture server stop refused");
+                    std::process::exit(17);
+                }
             }
             Some("compose") if actual == ["compose", "stop", "supervisor"] => {
                 if root.join(".fixture-supervisor-stop-failure").exists() {
@@ -9377,85 +9635,50 @@ fn main() {
     }
 
     /**
-    A ChatGPT plan keeps the Python LangGraph image running beside its Bot, and nothing else does.
+    Each plan raises its own engine with the stack, and nothing else does.
 
-    The Bot is the TypeScript engine, which sends a ChatGPT plan's model calls to the Python image
-    (`crate::plan::CHATGPT_PLAN_SERVICE`). Read from the `.env` the start wrote, as `crate::env`
-    writes it for each sign-in, so a key or a Claude plan raises one Bot image and not two.
+    A ChatGPT plan's Bot is the TypeScript engine, which sends the plan's model calls to the ChatGPT
+    plan's engine (`crate::plan::CHATGPT_PLAN_SERVICE`); a Claude plan's Bot is the Claude plan's
+    engine. Read from the connection recorded beside the installation, so a key raises one Bot
+    image and not two, and a change made in the app is what the next start raises.
     */
     #[test]
-    fn a_chatgpt_plan_raises_the_python_image_beside_its_bot_and_nothing_else_does() {
-        use crate::env::ModelCredential;
-        let root = temp_root("chatgpt-plan-services");
+    fn each_plan_raises_its_own_engine_and_nothing_else_does() {
+        use crate::saved_intent::ModelIntent;
+        let root = temp_root("plan-engine-services");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("docker-compose.yml"), THIS_RELEASES_COMPOSE).unwrap();
-        let plan = crate::plan::CHATGPT_PLAN_SERVICE;
-        for (credential, raised) in [
-            (
-                ModelCredential::ChatGptPlan {
-                    store: "{\"tokens\":{}}".into(),
-                },
-                true,
-            ),
-            (
-                ModelCredential::OpenAi {
-                    api_key: "sk-test".into(),
-                },
-                false,
-            ),
-            (
-                ModelCredential::ClaudePlan {
-                    token: "plan".into(),
-                },
-                false,
-            ),
+        let claude = "agent-claude-plan";
+        let chatgpt = crate::plan::CHATGPT_PLAN_SERVICE;
+        for (intent, raised) in [
+            (ModelIntent::ChatGptPlan, Some(chatgpt)),
+            (ModelIntent::ClaudePlan, Some(claude)),
+            (ModelIntent::OpenAiApiKey, None),
+            (ModelIntent::AnthropicApiKey, None),
+            (ModelIntent::CompatibleEndpoint, None),
+            (ModelIntent::GoogleOauth, None),
         ] {
-            let settings = crate::env::compose(
-                &crate::env::Intelligence {
-                    api_url: "https://api.example".into(),
-                    gateway_ws_url: "wss://realtime.example".into(),
-                    api_key: "key".into(),
-                },
-                &crate::env::Model {
-                    credential: credential.clone(),
-                },
-                &crate::engine::EngineStatus {
-                    engine: None,
-                    address: None,
-                    responding: true,
-                    engine_socket: None,
-                    detail: String::new(),
-                },
-                &crate::env::Ports::default(),
-                &[],
-                None,
-                &std::collections::BTreeMap::new(),
-            );
-            crate::env::write(
-                &root.join(".env"),
-                &settings,
-                &std::collections::BTreeMap::new(),
-            )
-            .unwrap();
-            assert_eq!(
-                selected_services(&root, true).contains(&plan),
-                raised,
-                "{credential:?}"
-            );
-            // No Bot picked, no Bot to send the calls: nothing raised for it.
-            assert!(!selected_services(&root, false).contains(&plan));
+            crate::saved_intent::record_settled(&root, intent).unwrap();
+            for harness in [true, false] {
+                let services = selected_services(&root, harness);
+                assert_eq!(
+                    services.contains(&chatgpt),
+                    raised == Some(chatgpt),
+                    "{intent:?} {services:?}"
+                );
+                assert_eq!(
+                    services.contains(&claude),
+                    raised == Some(claude),
+                    "{intent:?} {services:?}"
+                );
+            }
+            assert_eq!(plan_engine(&root).map(|alone| alone.service), raised);
         }
         // An installation whose Compose file has no such service is never asked to raise it.
         std::fs::write(root.join("docker-compose.yml"), RELEASED_COMPOSE_1_0_2).unwrap();
-        std::fs::write(
-            root.join(".env"),
-            format!(
-                "CHATGPT_PLAN_HARNESS_URL={}\n",
-                crate::plan::CHATGPT_PLAN_URL
-            ),
-        )
-        .unwrap();
-        assert!(!selected_services(&root, true).contains(&plan));
+        crate::saved_intent::record_settled(&root, ModelIntent::ChatGptPlan).unwrap();
+        assert!(!selected_services(&root, true).contains(&chatgpt));
+        assert_eq!(plan_engine(&root), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -9582,6 +9805,14 @@ fn main() {
 
     #[test]
     fn an_ipv6_only_port_is_named_unless_this_deployment_already_publishes_it() {
+        // It needs its port free again once it lets go: a process another test starts would hold
+        // a copy of the listener until it execs, which waits on the system's check of a new
+        // program for seconds on a busy Mac.
+        if crate::test_support::isolated_process(
+            "stack::tests::an_ipv6_only_port_is_named_unless_this_deployment_already_publishes_it",
+        ) {
+            return;
+        }
         let _ports = crate::test_support::hold_ports();
         let Some(listener) = ipv6_loopback_listener() else {
             return;
@@ -9604,6 +9835,12 @@ fn main() {
 
     #[test]
     fn an_ipv6_only_port_is_not_clear_while_its_listener_is_held() {
+        // It needs its port free again once it lets go, as the test above does.
+        if crate::test_support::isolated_process(
+            "stack::tests::an_ipv6_only_port_is_not_clear_while_its_listener_is_held",
+        ) {
+            return;
+        }
         let _ports = crate::test_support::hold_ports();
         let Some(listener) = ipv6_loopback_listener() else {
             return;
@@ -10533,7 +10770,7 @@ fn main() {
         installation_images(engine, root, true, &secrets).unwrap();
         pull(engine, root, true, &secrets, |_| {}).unwrap();
         up(engine, root, true, &secrets).unwrap();
-        restart_openbot(engine, root).unwrap();
+        recreate_openbot(engine, root, &secrets).unwrap();
         down(engine, root).unwrap();
         std::fs::read_to_string(record).unwrap()
     }
@@ -10594,8 +10831,8 @@ fn main() {
             "{log}"
         );
         assert_eq!(
-            commands_ending(&log, "restart server"),
-            ["compose --profile openbot restart server"],
+            commands_ending(&log, "--pull never server"),
+            ["compose up -d --no-deps --force-recreate --no-build --pull never server"],
             "{log}"
         );
         // Nothing of an earlier release's is on the engine, so nothing is removed.
@@ -10649,8 +10886,8 @@ fn main() {
             "{log}"
         );
             assert_eq!(
-                commands_ending(&log, "restart server worker"),
-                ["compose --profile openbot restart server worker"],
+                commands_ending(&log, "--pull never server worker"),
+                ["compose up -d --no-deps --force-recreate --no-build --pull never server worker"],
                 "{log}"
             );
             assert!(
@@ -11327,6 +11564,131 @@ fn main() {
         }
     }
 
+    /// The first Start straight after Install, while the engine is not answering for a moment (a
+    /// Podman machine busy as the back end's cluster comes up in it, or just restarted under it),
+    /// waits for the engine and goes on: the images Install pulled are there. An engine that did not
+    /// answer `image inspect` was read as one without the images, and Start refused with "Finish
+    /// installing OpenBot's local software" until the person went round Install again. An engine
+    /// that answers and does not have an image still sends Start back to Install, without a wait.
+    #[test]
+    fn start_straight_after_install_waits_for_an_engine_that_is_not_answering_yet() {
+        if crate::test_support::isolated_process(
+            "stack::tests::start_straight_after_install_waits_for_an_engine_that_is_not_answering_yet",
+        ) {
+            return;
+        }
+        let path = PathFixture::with_fake_engine("installed-services");
+        for (name, engine) in ["docker", "podman"]
+            .into_iter()
+            .zip(computer_stop_addresses(&path))
+        {
+            let release = release_with_this_file("v1.0.4", 'b');
+            let (root, _record) = installed_services_root(
+                &path,
+                &format!("first-start-{name}"),
+                &release.compose,
+                "",
+            );
+            std::fs::write(root.join(".fixture-images"), "").unwrap();
+            lay_out_release(&root, &release);
+            install_release(&engine, &root).unwrap();
+
+            // Not answering when Start asks, and answering again a moment later.
+            let not_answering = root.join(".fixture-engine-not-answering");
+            std::fs::write(&not_answering, "").unwrap();
+            let back = {
+                let not_answering = not_answering.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::fs::remove_file(not_answering).unwrap();
+                })
+            };
+            let started = crate::preparation::require(&root, Some(&None), &engine);
+            back.join().unwrap();
+            if let Err(problem) = started {
+                panic!("{name}: Start refused an installation that had just finished: {problem:?}");
+            }
+
+            // One image gone from an engine that answers: Install again, at once.
+            let store = std::fs::read_to_string(root.join(".fixture-images")).unwrap();
+            let gone = store.lines().next().unwrap().split('\t').next().unwrap();
+            let kept: String = store
+                .lines()
+                .skip(1)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            std::fs::write(root.join(".fixture-images"), kept).unwrap();
+            let asked = std::time::Instant::now();
+            let refused = crate::preparation::require(&root, Some(&None), &engine).unwrap_err();
+            assert!(
+                asked.elapsed() < std::time::Duration::from_secs(1),
+                "{name}: waited"
+            );
+            assert_eq!(refused.said, crate::preparation::REQUIRED, "{name}");
+            assert_eq!(
+                refused.connection,
+                Some(crate::problem::Connection::Installation),
+                "{name}"
+            );
+            assert!(
+                refused
+                    .detail
+                    .as_deref()
+                    .is_some_and(|said| said.contains(gone)),
+                "{name}: {refused:?}"
+            );
+        }
+    }
+
+    /// An engine that does not answer for the whole wait is said as that, not as an installation
+    /// to finish: installing again would not reach it either.
+    #[test]
+    fn an_engine_that_never_answers_is_not_an_installation_to_finish() {
+        if crate::test_support::isolated_process(
+            "stack::tests::an_engine_that_never_answers_is_not_an_installation_to_finish",
+        ) {
+            return;
+        }
+        let path = PathFixture::with_fake_engine("installed-services");
+        for (name, engine) in ["docker", "podman"]
+            .into_iter()
+            .zip(computer_stop_addresses(&path))
+        {
+            let release = release_with_this_file("v1.0.4", 'b');
+            let (root, _record) = installed_services_root(
+                &path,
+                &format!("never-answers-{name}"),
+                &release.compose,
+                "",
+            );
+            std::fs::write(root.join(".fixture-images"), "").unwrap();
+            lay_out_release(&root, &release);
+            install_release(&engine, &root).unwrap();
+            let images = crate::preparation::installed_images(&root).unwrap();
+            std::fs::write(root.join(".fixture-engine-not-answering"), "").unwrap();
+            let problem = crate::preparation::require_images_within(
+                &engine,
+                &images,
+                std::time::Duration::from_millis(300),
+                std::time::Duration::from_millis(50),
+            )
+            .unwrap_err();
+            assert_ne!(problem.said, crate::preparation::REQUIRED, "{name}");
+            assert_eq!(problem.connection, None, "{name}");
+            assert!(
+                problem.said.contains("not answering"),
+                "{name}: {problem:?}"
+            );
+            assert!(
+                problem
+                    .detail
+                    .as_deref()
+                    .is_some_and(|said| said.contains("Cannot connect")),
+                "{name}: {problem:?}"
+            );
+        }
+    }
+
     /// An image a container was made from cannot go yet: the earlier computer image, which a
     /// stopped Bot computer of this installation still uses, and the earlier server image, which
     /// a container of another Compose project uses. The engine refuses each, in its own words and
@@ -11620,6 +11982,9 @@ fn main() {
             let log = std::fs::read_to_string(record).unwrap();
             println!("{} shutdown trace:\n{log}", address.engine.binary());
             assert_computer_shutdown_preserves_foreign_and_volumes(&root);
+            let server = log
+                .find("compose -f docker-compose.yml --profile openbot stop --timeout 15 server")
+                .unwrap();
             let config = log.find("config --format json").unwrap();
             let supervisor = log
                 .find("compose -f docker-compose.yml stop supervisor")
@@ -11630,12 +11995,42 @@ fn main() {
                 .find("--profile harness --profile openbot down")
                 .unwrap();
             assert!(
-                config < supervisor
+                config < server
+                    && server < supervisor
                     && supervisor < snapshot
                     && snapshot < computers
                     && computers < teardown,
                 "{log}"
             );
+        }
+    }
+
+    /// A server that can't be stopped on its own first still leaves the rest to stop: `compose down`
+    /// stops it with everything else, as it did before the server was stopped first.
+    #[test]
+    fn stop_with_a_server_that_wont_stop_first_still_stops_everything() {
+        if crate::test_support::isolated_process(
+            "stack::tests::stop_with_a_server_that_wont_stop_first_still_stops_everything",
+        ) {
+            return;
+        }
+        let path = PathFixture::with_fake_engine("computer-stop");
+        for address in computer_stop_addresses(&path) {
+            let (root, record) =
+                computer_shutdown_race_root(&path, &format!("root-{}", address.engine.binary()));
+            std::fs::write(root.join(".fixture-server-stop-failure"), "").unwrap();
+            down(&address, &root).unwrap();
+            let log = std::fs::read_to_string(record).unwrap();
+            assert!(
+                log.contains("--profile openbot stop --timeout 15 server"),
+                "{log}"
+            );
+            assert!(
+                log.contains("--profile harness --profile openbot down"),
+                "{log}"
+            );
+            assert_computer_shutdown_preserves_foreign_and_volumes(&root);
+            assert!(root.join("stack.down").exists());
         }
     }
 
@@ -11658,7 +12053,8 @@ fn main() {
                 "{error}"
             );
             let log = std::fs::read_to_string(&record).unwrap();
-            assert_eq!(log.lines().count(), 2, "{log}");
+            // Its namespace, the server's own stop, then the supervisor's stop that failed.
+            assert_eq!(log.lines().count(), 3, "{log}");
             assert!(
                 !log.contains("ps --quiet") && !log.contains("harness down"),
                 "{log}"
@@ -11843,7 +12239,8 @@ fn main() {
     }
     for listener in &listeners { listener.set_nonblocking(true).unwrap(); }
     let mut requests = std::fs::File::create(format!("{name}.requests")).unwrap();
-    std::fs::write(format!("{name}.port"), port.to_string()).unwrap();
+    println!("{port}");
+    std::io::stdout().flush().unwrap();
     let mut ipv4_requests = 0_usize;
     loop {
         for listener in &listeners {
@@ -11888,33 +12285,29 @@ fn main() {
                     format!("synthetic {name} diagnostic"),
                 )
                 .unwrap();
-                fixture.children.push((
-                    name,
-                    Command::new(&binary)
-                        .args([name, mode])
-                        .current_dir(&fixture.root)
-                        .spawn()
-                        .unwrap(),
-                ));
-                let port_file = fixture.root.join(format!("{name}.port"));
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                let port = loop {
-                    if let Ok(port) = std::fs::read_to_string(&port_file) {
-                        if let Ok(port) = port.parse() {
-                            break port;
-                        }
-                    }
-                    assert!(fixture
-                        .children
-                        .last_mut()
-                        .unwrap()
-                        .1
-                        .try_wait()
-                        .unwrap()
-                        .is_none());
-                    assert!(std::time::Instant::now() < deadline, "fixture did not bind");
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                };
+                let mut child = Command::new(&binary)
+                    .args([name, mode])
+                    .current_dir(&fixture.root)
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                // The fixture says its port once both loopbacks are bound. Waiting for that line, not
+                // for a deadline, holds however slowly a loaded computer starts it; a fixture that
+                // dies first closes its output and is reported as it is.
+                let mut said = String::new();
+                std::io::BufRead::read_line(
+                    &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+                    &mut said,
+                )
+                .unwrap();
+                fixture.children.push((name, child));
+                let port = said.trim().parse().unwrap_or_else(|_| {
+                    let child = &mut fixture.children.last_mut().unwrap().1;
+                    panic!(
+                        "the {name} fixture stopped before it bound: {:?}",
+                        child.wait()
+                    )
+                });
                 if name == "server" {
                     fixture.ready.api = port;
                 } else {
@@ -12277,7 +12670,7 @@ fn main() {
             // The next Start takes the old sentence away before the server runs again. One that
             // crashes instead writes none: the same `running` rows are not a refusal, and the wait
             // runs out as it always did.
-            forget_refusal(&root);
+            forget_refusal(&address, &root);
             assert!(!root.join(".openbot").join(REFUSAL_FILE).exists());
             std::fs::write(root.join(".fixture-server-rows"), PODMAN_RUNNING).unwrap();
             std::fs::write(root.join(".fixture-server-asked"), "0").unwrap();
@@ -12306,6 +12699,114 @@ fn main() {
             Some("6c1f0e2a9b3d")
         );
         assert_eq!(refused_server_in(PODMAN_RUNNING), None);
+    }
+
+    /// A Retry after the setting was put right reads no refusal from the server it replaces.
+    ///
+    /// Found on Windows under Podman: SMTP_HOST without MAIL_FROM, Start, the refusal shown; the
+    /// setting taken out, Retry, and the same sentence again although the new server answered
+    /// `/health`. The old server, which the engine kept restarting with the old settings, refused
+    /// again and wrote its sentence after Start took the file away and before Compose replaced it.
+    /// Here that server writes its sentence every 10 ms until the engine stops it.
+    #[test]
+    fn a_retry_reads_no_refusal_from_the_server_it_replaces() {
+        if crate::test_support::isolated_process(
+            "stack::tests::a_retry_reads_no_refusal_from_the_server_it_replaces",
+        ) {
+            return;
+        }
+        let path = PathFixture::with_fake_engine("server-refusal");
+        for address in computer_stop_addresses(&path) {
+            let (root, _) =
+                computer_stop_root(&path, &format!("retry-{}", address.engine.binary()), "{}");
+            // The new server is up: the engine reports no refusal of its own.
+            std::fs::write(root.join(".fixture-server-rows"), PODMAN_RUNNING).unwrap();
+            std::fs::create_dir_all(root.join(".openbot")).unwrap();
+            let file = root.join(".openbot").join(REFUSAL_FILE);
+            std::fs::write(&file, format!("{REFUSAL}\n")).unwrap();
+            std::fs::write(root.join(".fixture-old-server-alive"), "").unwrap();
+            let old_server = {
+                let (root, file) = (root.clone(), file.clone());
+                std::thread::spawn(move || {
+                    while !root.join(".fixture-stop-server").exists() {
+                        std::fs::write(&file, format!("{REFUSAL}\n")).ok();
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    // Told to stop, it takes a moment to go, and refuses again meanwhile: only
+                    // waiting for it to be gone, as `rm --stop` does, leaves nothing to read.
+                    let stopping = std::time::Instant::now();
+                    while stopping.elapsed() < std::time::Duration::from_secs(1) {
+                        std::fs::write(&file, format!("{REFUSAL}\n")).ok();
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    std::fs::remove_file(root.join(".fixture-old-server-alive")).unwrap();
+                })
+            };
+
+            forget_refusal(&address, &root);
+            // Many times over the time the old server takes to come round again.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let read = server_refusal(&address, &root);
+
+            std::fs::write(root.join(".fixture-stop-server"), "").unwrap();
+            old_server.join().unwrap();
+            assert!(
+                !root.join(".fixture-rm-gave-up").exists(),
+                "{address:?}: the engine gave up waiting for the old server to stop"
+            );
+            assert_eq!(read, None, "{address:?}: the old server's refusal was read");
+        }
+    }
+
+    /// A Retry that catches the old server's sentence half written still removes that server.
+    ///
+    /// A server writes the file by emptying it and then writing its sentence, every time the
+    /// engine restarts it. Caught between the two, the file was there but empty, read as no
+    /// refusal; Podman reports the server `running` nearly all the time, so the old server was
+    /// left in place and wrote its sentence again before Compose replaced it. Here the old
+    /// server is held between the two until the engine stops it, or until the Retry is over.
+    #[test]
+    fn a_retry_that_catches_a_refusal_half_written_still_removes_its_server() {
+        if crate::test_support::isolated_process(
+            "stack::tests::a_retry_that_catches_a_refusal_half_written_still_removes_its_server",
+        ) {
+            return;
+        }
+        let path = PathFixture::with_fake_engine("server-refusal");
+        for address in computer_stop_addresses(&path) {
+            let (root, _) =
+                computer_stop_root(&path, &format!("half-{}", address.engine.binary()), "{}");
+            std::fs::write(root.join(".fixture-server-rows"), PODMAN_RUNNING).unwrap();
+            std::fs::create_dir_all(root.join(".openbot")).unwrap();
+            let file = root.join(".openbot").join(REFUSAL_FILE);
+            // Emptied, its sentence not yet written.
+            std::fs::write(&file, "").unwrap();
+            std::fs::write(root.join(".fixture-old-server-alive"), "").unwrap();
+            let old_server = {
+                let (root, file) = (root.clone(), file.clone());
+                std::thread::spawn(move || {
+                    let (stop, finish) = (
+                        root.join(".fixture-stop-server"),
+                        root.join(".fixture-finish-writing"),
+                    );
+                    while !stop.exists() && !finish.exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    if !stop.exists() {
+                        std::fs::write(&file, format!("{REFUSAL}\n")).unwrap();
+                    }
+                    std::fs::remove_file(root.join(".fixture-old-server-alive")).unwrap();
+                })
+            };
+
+            forget_refusal(&address, &root);
+            // A server still there finishes its sentence now.
+            std::fs::write(root.join(".fixture-finish-writing"), "").unwrap();
+            old_server.join().unwrap();
+            let read = server_refusal(&address, &root);
+
+            assert_eq!(read, None, "{address:?}: the old server's refusal was read");
+        }
     }
 
     /// The folder-derived name is now only the name an earlier app's installation ran as, which

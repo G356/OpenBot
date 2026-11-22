@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthedRouteImport } from './routes/_authed'
+import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
 import { Route as ConnectingRouteImport } from './routes/connecting'
 import { Route as DesktopReturnRouteImport } from './routes/desktop-return'
 import { Route as SignRouteImport } from './routes/sign'
@@ -17,6 +18,7 @@ import { Route as AuthedAppRouteImport } from './routes/_authed/_app'
 import { Route as AuthedAdminRouteRouteImport } from './routes/_authed/admin/route'
 import { Route as AuthedOnboardingRouteImport } from './routes/_authed/onboarding'
 import { Route as AuthedSettingsRouteRouteImport } from './routes/_authed/settings/route'
+import { Route as AuthedTermsRouteImport } from './routes/_authed/terms'
 import { Route as AuthedAppIndexRouteImport } from './routes/_authed/_app/index'
 import { Route as AuthedAppApprovalsRouteImport } from './routes/_authed/_app/approvals'
 import { Route as AuthedAppBotRouteImport } from './routes/_authed/_app/bot'
@@ -138,6 +140,11 @@ const AuthedRoute = AuthedRouteImport.update({
   id: '/_authed',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AcceptInviteRoute = AcceptInviteRouteImport.update({
+  id: '/accept-invite',
+  path: '/accept-invite',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ConnectingRoute = ConnectingRouteImport.update({
   id: '/connecting',
   path: '/connecting',
@@ -170,6 +177,11 @@ const AuthedOnboardingRoute = AuthedOnboardingRouteImport.update({
 const AuthedSettingsRouteRoute = AuthedSettingsRouteRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedTermsRoute = AuthedTermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
   getParentRoute: () => AuthedRoute,
 } as any)
 const AuthedAppIndexRoute = AuthedAppIndexRouteImport.update({
@@ -810,12 +822,14 @@ const AuthedAdminPluginsKeyToolsToolRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthedAppIndexRoute
+  '/accept-invite': typeof AcceptInviteRoute
   '/connecting': typeof ConnectingRoute
   '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
   '/admin': typeof AuthedAdminRouteRouteWithChildren
   '/settings': typeof AuthedSettingsRouteRouteWithChildren
   '/onboarding': typeof AuthedOnboardingRoute
+  '/terms': typeof AuthedTermsRoute
   '/approvals': typeof AuthedAppApprovalsRoute
   '/bot': typeof AuthedAppBotRoute
   '/browser': typeof AuthedAppBrowserRoute
@@ -933,10 +947,12 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof AuthedAppIndexRoute
+  '/accept-invite': typeof AcceptInviteRoute
   '/connecting': typeof ConnectingRoute
   '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
   '/onboarding': typeof AuthedOnboardingRoute
+  '/terms': typeof AuthedTermsRoute
   '/approvals': typeof AuthedAppApprovalsRoute
   '/bot': typeof AuthedAppBotRoute
   '/browser': typeof AuthedAppBrowserRoute
@@ -1055,6 +1071,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authed': typeof AuthedRouteWithChildren
+  '/accept-invite': typeof AcceptInviteRoute
   '/connecting': typeof ConnectingRoute
   '/desktop-return': typeof DesktopReturnRoute
   '/sign': typeof SignRoute
@@ -1062,6 +1079,7 @@ export interface FileRoutesById {
   '/_authed/settings': typeof AuthedSettingsRouteRouteWithChildren
   '/_authed/_app': typeof AuthedAppRouteWithChildren
   '/_authed/onboarding': typeof AuthedOnboardingRoute
+  '/_authed/terms': typeof AuthedTermsRoute
   '/_authed/_app/approvals': typeof AuthedAppApprovalsRoute
   '/_authed/_app/bot': typeof AuthedAppBotRoute
   '/_authed/_app/browser': typeof AuthedAppBrowserRoute
@@ -1183,12 +1201,14 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/accept-invite'
     | '/connecting'
     | '/desktop-return'
     | '/sign'
     | '/admin'
     | '/settings'
     | '/onboarding'
+    | '/terms'
     | '/approvals'
     | '/bot'
     | '/browser'
@@ -1306,10 +1326,12 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/accept-invite'
     | '/connecting'
     | '/desktop-return'
     | '/sign'
     | '/onboarding'
+    | '/terms'
     | '/approvals'
     | '/bot'
     | '/browser'
@@ -1427,6 +1449,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_authed'
+    | '/accept-invite'
     | '/connecting'
     | '/desktop-return'
     | '/sign'
@@ -1434,6 +1457,7 @@ export interface FileRouteTypes {
     | '/_authed/settings'
     | '/_authed/_app'
     | '/_authed/onboarding'
+    | '/_authed/terms'
     | '/_authed/_app/approvals'
     | '/_authed/_app/bot'
     | '/_authed/_app/browser'
@@ -1554,6 +1578,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   AuthedRoute: typeof AuthedRouteWithChildren
+  AcceptInviteRoute: typeof AcceptInviteRoute
   ConnectingRoute: typeof ConnectingRoute
   DesktopReturnRoute: typeof DesktopReturnRoute
   SignRoute: typeof SignRoute
@@ -1566,6 +1591,13 @@ declare module '@tanstack/react-router' {
       path: ''
       fullPath: '/'
       preLoaderRoute: typeof AuthedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/accept-invite': {
+      id: '/accept-invite'
+      path: '/accept-invite'
+      fullPath: '/accept-invite'
+      preLoaderRoute: typeof AcceptInviteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/connecting': {
@@ -1615,6 +1647,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof AuthedSettingsRouteRouteImport
+      parentRoute: typeof AuthedRoute
+    }
+    '/_authed/terms': {
+      id: '/_authed/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof AuthedTermsRouteImport
       parentRoute: typeof AuthedRoute
     }
     '/_authed/_app/': {
@@ -2718,6 +2757,7 @@ interface AuthedRouteChildren {
   AuthedSettingsRouteRoute: typeof AuthedSettingsRouteRouteWithChildren
   AuthedAppRoute: typeof AuthedAppRouteWithChildren
   AuthedOnboardingRoute: typeof AuthedOnboardingRoute
+  AuthedTermsRoute: typeof AuthedTermsRoute
   AuthedSignInRequestIdRoute: typeof AuthedSignInRequestIdRoute
 }
 
@@ -2726,6 +2766,7 @@ const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedSettingsRouteRoute: AuthedSettingsRouteRouteWithChildren,
   AuthedAppRoute: AuthedAppRouteWithChildren,
   AuthedOnboardingRoute: AuthedOnboardingRoute,
+  AuthedTermsRoute: AuthedTermsRoute,
   AuthedSignInRequestIdRoute: AuthedSignInRequestIdRoute,
 }
 
@@ -2734,6 +2775,7 @@ const AuthedRouteWithChildren =
 
 const rootRouteChildren: RootRouteChildren = {
   AuthedRoute: AuthedRouteWithChildren,
+  AcceptInviteRoute: AcceptInviteRoute,
   ConnectingRoute: ConnectingRoute,
   DesktopReturnRoute: DesktopReturnRoute,
   SignRoute: SignRoute,

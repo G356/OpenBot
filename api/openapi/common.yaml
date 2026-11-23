@@ -27,10 +27,13 @@ info:
 
 
     An OpenBot install holds one or more organizations, and a person may be a
-    member of several. Where an install allows more than one, everybody has
-    an organization of their own, made for them when they first sign in, and
-    joins others by invitation. Otherwise, and on an install for one person
-    with no sign-in, everybody works in the organization `default`.
+    member of several. Where an install allows more than one, people create
+    others and join them by invitation. On a self-hosted install everybody
+    who signs in is a member of `default`, the one organization they share,
+    unless the install gives everybody an organization of their own as they
+    first sign in, as OpenBot Cloud does. Otherwise, and on an install for
+    one person with no sign-in, everybody works in the organization
+    `default`.
     organizationId is an organization's id or its slug, and the caller must
     be a member of it: an organization the caller is not in answers exactly
     as one that does not exist, `default` included.
@@ -401,6 +404,8 @@ paths:
   /api/v2/organizations/{organizationId}/computers/update: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1update' }
   /api/v2/organizations/{organizationId}/computers/{botId}: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}' }
   /api/v2/organizations/{organizationId}/computers/{botId}/wake: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1wake' }
+  /api/v2/organizations/{organizationId}/computers/{botId}/workspace-snapshots: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1workspace-snapshots' }
+  /api/v2/organizations/{organizationId}/computers/{botId}/restore: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1restore' }
   /api/v2/organizations/{organizationId}/computers/{botId}/screenshot: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1screenshot' }
   /api/v2/organizations/{organizationId}/computers/{botId}/page-frames/{toolCallId}: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1page-frames~1{toolCallId}' }
   /api/v2/organizations/{organizationId}/computers/{botId}/page: { $ref: './computers.yaml#/paths/~1api~1v2~1organizations~1{organizationId}~1computers~1{botId}~1page' }

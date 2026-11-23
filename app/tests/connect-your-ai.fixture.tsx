@@ -15,7 +15,10 @@ import { useSwitchOrganization } from "@/components/organizations/use-switch-org
 import { SettingsSidebar } from "@/components/settings/settings-sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
 import { SidebarInset } from "@/components/ui/sidebar";
-import { setCurrentOrganization } from "@/lib/organizations/current";
+import {
+  setCurrentOrganization,
+  useCurrentOrganizationId,
+} from "@/lib/organizations/current";
 import { queryClient } from "@/query-client";
 import type { RouterContext } from "@/router-context";
 import { Route as AuthedRoute } from "@/routes/_authed";
@@ -64,15 +67,32 @@ const authedRoute = createRoute({
  */
 function Home() {
   const switching = useSwitchOrganization();
+  // Which organization's home this is: the one the app works in.
+  const organization = useCurrentOrganizationId();
   return (
     <main>
-      <h1 data-app-home="">Home</h1>
+      <h1 data-app-home="" data-organization={organization}>
+        Home
+      </h1>
       <button onClick={() => switching.run("acme")} type="button">
         Work in Acme
       </button>
     </main>
   );
 }
+
+/**
+ * An app's page, as the move's Reconnect opens it (`/connections/<app>`): a stand-in that says which
+ * app it is. What matters here is that the gate gets the person to it.
+ */
+const appRoute = createRoute({
+  getParentRoute: () => authedRoute,
+  path: "/connections/$key",
+  component: function AppPage() {
+    const { key } = appRoute.useParams();
+    return <h1 data-app-connect={key}>{key}</h1>;
+  },
+});
 
 const onboardingRoute = (
   OnboardingRoute as unknown as {
@@ -103,6 +123,7 @@ const router = createRouter({
   routeTree: rootRoute.addChildren([
     authedRoute.addChildren([
       onboardingRoute as never,
+      appRoute,
       settingsRoute.addChildren([
         createRoute({
           getParentRoute: () => settingsRoute,

@@ -78,6 +78,12 @@ export const ListOrganizationsResponse = zod.object({
             .describe(
               "Whether the caller is working in this one: the organization their session works in, or for an app's token the one its OpenBot-Organization header names, else the caller's own. Always false for a request made with an API key.",
             ),
+          canMoveIn: zod
+            .boolean()
+            .optional()
+            .describe(
+              "Whether the caller may move their Bots into this organization (createImport): true where the organization lets them use Bots. The server's verdict, by the organization's own rules. Present only where OpenBot takes moves (OpenBot Cloud).",
+            ),
         })
         .describe(
           "One organization, as one of its members sees it. role and active are the server's verdicts about the caller.",
@@ -165,6 +171,12 @@ export const CreateOrganizationResponse = zod.object({
         .boolean()
         .describe(
           "Whether the caller is working in this one: the organization their session works in, or for an app's token the one its OpenBot-Organization header names, else the caller's own. Always false for a request made with an API key.",
+        ),
+      canMoveIn: zod
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the caller may move their Bots into this organization (createImport): true where the organization lets them use Bots. The server's verdict, by the organization's own rules. Present only where OpenBot takes moves (OpenBot Cloud).",
         ),
     })
     .describe(
@@ -352,6 +364,12 @@ export const UpdateOrganizationResponse = zod.object({
         .boolean()
         .describe(
           "Whether the caller is working in this one: the organization their session works in, or for an app's token the one its OpenBot-Organization header names, else the caller's own. Always false for a request made with an API key.",
+        ),
+      canMoveIn: zod
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the caller may move their Bots into this organization (createImport): true where the organization lets them use Bots. The server's verdict, by the organization's own rules. Present only where OpenBot takes moves (OpenBot Cloud).",
         ),
     })
     .describe(
@@ -627,7 +645,7 @@ export const ListOrganizationInvitationsResponse = zod.object({
 });
 
 /**
- * Invite the person with this email address to join the organization with a role. They need no account yet: the invitation waits for whoever signs in with that address, and they see it in OpenBot then. Where OpenBot can send email, it also emails them; delivery says which happened, so the inviter knows whether to pass the link on themselves. The invitation lasts seven days. Inviting an address again after its invitation expired or was declined starts a new one. Only an owner or an admin of this organization can. A repeated request with the same Idempotency-Key and body returns the first result.
+ * Invite the person with this email address to join the organization with a role. They need no account yet: the invitation waits for whoever signs in with that address, and they see it in OpenBot then. Where OpenBot can send email, it also emails them; delivery says which happened, so the inviter knows whether to pass the link on themselves. The invitation lasts seven days. Inviting an address again after its invitation expired or was declined starts a new one. Only an owner or an admin of this organization can. An organization that pays for each member needs a free seat for the person: with none, the invitation is refused with SEAT_REQUIRED and addSeatUrl, and nothing is invited. A repeated request with the same Idempotency-Key and body returns the first result.
  * @summary Invite somebody to an organization
  */
 
@@ -779,7 +797,7 @@ export const GetOrganizationPlanResponse = zod
     status: zod
       .string()
       .describe(
-        "not_required when this OpenBot needs no plan. free when the organization isn't on the plan and the person reading has free runs left. active on the plan. past_due when a payment failed and the card needs updating. none when a card is needed: the person's free runs are used up, or there are none, or the plan ended. trialing during a free trial that ends on a date (trialEndsAt); OpenBot Cloud's free allowance is counted in runs and doesn't use it. unknown when the plan couldn't be read just now; Bots keep running meanwhile.",
+        "not_required when this OpenBot needs no plan. free when the organization isn't on the plan and the person reading has free runs left, or works for the company that makes OpenBot (copilotKitEmployee) and would otherwise read none. active on the plan. past_due when a payment failed and the card needs updating. none when a card is needed: the person's free runs are used up, or there are none, or the plan ended. trialing during a free trial that ends on a date (trialEndsAt); OpenBot Cloud's free allowance is counted in runs and doesn't use it. unknown when the plan couldn't be read just now; Bots keep running meanwhile.",
       ),
     freeRunsUsedPercent: zod
       .int()
@@ -794,7 +812,13 @@ export const GetOrganizationPlanResponse = zod
       .min(1)
       .optional()
       .describe(
-        "How many free runs each person gets. Present only once the reading person has used them all (freeRunsUsedPercent is 100 and status is none), so the number is never shown while runs are left; absent otherwise.",
+        "How many free runs each person gets. Present only once the reading person has used them all (freeRunsUsedPercent is 100, and status is none, or free for copilotKitEmployee), so the number is never shown while runs are left; absent otherwise.",
+      ),
+    copilotKitEmployee: zod
+      .boolean()
+      .optional()
+      .describe(
+        "True when the reading person works for the company that makes OpenBot: their verified email address is on the copilotkit.ai domain exactly. An employee's own runs are never refused for want of a plan, in any organization, whatever status says. status is still the organization's own (active, past_due and the rest), with one exception: where it would be none, an employee reads free, so once their free allowance is used they get freeRunsUsedPercent 100 and freeRunsAllowance. Their addCardUrl is null, unless they are an owner or an admin and the organization needs a card for members who aren't employees: then it is set, so they can pay for the others. past_due keeps its addCardUrl for an owner or an admin, since the organization's payment still needs updating for everyone else in it. Present only while required is true and the reader is an employee; absent otherwise. It is about the reader alone: other members of the same organization are unaffected, and the organization's plan is unchanged.",
       ),
     trialEndsAt: zod.iso
       .datetime({ offset: true })
@@ -1017,6 +1041,12 @@ export const AcceptInvitationResponse = zod.object({
         .boolean()
         .describe(
           "Whether the caller is working in this one: the organization their session works in, or for an app's token the one its OpenBot-Organization header names, else the caller's own. Always false for a request made with an API key.",
+        ),
+      canMoveIn: zod
+        .boolean()
+        .optional()
+        .describe(
+          "Whether the caller may move their Bots into this organization (createImport): true where the organization lets them use Bots. The server's verdict, by the organization's own rules. Present only where OpenBot takes moves (OpenBot Cloud).",
         ),
     })
     .describe(

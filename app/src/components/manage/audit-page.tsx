@@ -47,6 +47,12 @@ import {
 } from "@/lib/audit/queries";
 import { currentUserQueryOptions } from "@/lib/auth/queries";
 import { deploymentCapabilitiesQueryOptions } from "@/lib/deployment/queries";
+import {
+  type Failure,
+  failureOf,
+  failureSaid,
+  loadFailure,
+} from "@/lib/load-failure";
 import { useManagePaths } from "@/lib/manage-paths";
 import { useCurrentOrganizationId } from "@/lib/organizations/current";
 import { organizationMembersQueryOptions } from "@/lib/organizations/queries";
@@ -237,10 +243,16 @@ export function AuditPage({
   >(null);
   // This deployment's Bots, apps and rules, asked for the first time a chip menu opens.
   const [vocabularyWanted, setVocabularyWanted] = useState(false);
-  const vocabulary = useQuery({
+  const vocabularyRead = useQuery({
     ...auditVocabularyQueryOptions(),
     enabled: ask && vocabularyWanted,
-  }).data;
+  });
+  const vocabulary = vocabularyRead.data;
+  // Why the menus have nothing to offer, once the read has answered: a hold or a failure, not "Loading…".
+  const vocabularyFailed =
+    vocabularyRead.isError && !vocabularyRead.isFetching
+      ? vocabularyRead.error
+      : null;
   // The stored event names and OpenBot's own working are Admin's to read; the personal edition's
   // Activity is anybody's page. Its route has the edition loaded before this draws.
   const edition = useQuery(deploymentCapabilitiesQueryOptions()).data?.edition;
@@ -288,7 +300,7 @@ export function AuditPage({
   );
   const nameFor = useBotNames();
   const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<Failure | null>(null);
   const [exportCapped, setExportCapped] = useState<number | null>(null);
 
   /*
@@ -316,9 +328,7 @@ export function AuditPage({
       URL.revokeObjectURL(url);
     } catch (error) {
       setExportError(
-        error instanceof Error
-          ? error.message
-          : "Couldn't export these events. Try again.",
+        failureOf(error, "Couldn't export these events. Try again."),
       );
     } finally {
       setExporting(false);
@@ -367,7 +377,10 @@ export function AuditPage({
           {events.isPending ? null : events.isError &&
             !events.isFetchNextPageError ? (
             <p className="px-4 text-destructive text-sm" role="alert">
-              Couldn't load these events. Try again in a moment.
+              {loadFailure(
+                events.error,
+                "Couldn't load these events. Try again in a moment.",
+              )}
             </p>
           ) : (
             <AuditTable
@@ -378,7 +391,10 @@ export function AuditPage({
                   <div className="flex flex-col items-center gap-2 py-3">
                     {events.isFetchNextPageError ? (
                       <p className="text-destructive text-sm" role="alert">
-                        Couldn't load older events. Try again.
+                        {loadFailure(
+                          events.error,
+                          "Couldn't load older events. Try again.",
+                        )}
                       </p>
                     ) : null}
                     <Button
@@ -470,8 +486,14 @@ export function AuditPage({
                         labels={answer?.labels ?? NO_LABELS}
                         nameFor={nameFor}
                         onChange={setChips}
-                        onOpen={() => setVocabularyWanted(true)}
+                        onOpen={() => {
+                          setVocabularyWanted(true);
+                          // A read that failed is asked again as a menu opens.
+                          if (vocabularyRead.isError)
+                            void vocabularyRead.refetch();
+                        }}
                         vocabulary={vocabulary}
+                        vocabularyFailed={vocabularyFailed}
                       />
                     ) : (
                       filters
@@ -504,7 +526,7 @@ export function AuditPage({
                   </div>
                   {exportError ? (
                     <p className="text-destructive text-sm" role="alert">
-                      {exportError}
+                      {failureSaid(exportError)}
                     </p>
                   ) : null}
                   {exportCapped ? (

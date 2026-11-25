@@ -7,6 +7,7 @@ import {
   REACT_TOOL,
   STOP_TOOL,
 } from "./orchestration";
+import { RECALL_EARLIER_RESULTS } from "./recall-earlier-results";
 import { RESEARCH_ROLE_LABELS, researchRoleOfTool } from "./research";
 import { SUBAGENT_TOOL } from "./subagent";
 import { lowerFirst, nameInWords } from "./tool-name-words";
@@ -267,6 +268,23 @@ function settingsAsk(
       const name =
         typeof change?.bot?.name === "string" ? change.bot.name.trim() : "";
       return name ? `change ${name}'s settings` : "change a Bot's settings";
+    }
+    case "update_bot_apps": {
+      // The Bot and the app, by the names its preview gives (`change.bot`, `change.app`).
+      const change =
+        target && typeof target === "object"
+          ? (
+              target as {
+                change?: { bot?: { name?: unknown }; app?: { name?: unknown } };
+              }
+            ).change
+          : undefined;
+      const bot =
+        typeof change?.bot?.name === "string" ? change.bot.name.trim() : "";
+      const app =
+        typeof change?.app?.name === "string" ? change.app.name.trim() : "";
+      const what = `change what ${bot || "a Bot"} can use`;
+      return app ? `${what} in ${app}` : what;
     }
     case "update_organization_settings":
       return "change your organization's settings";
@@ -646,6 +664,11 @@ const OWN_TOOLS: Record<string, OwnTool> = {
   [SEARCH_TOOLS]: {
     running: "Looking for a tool",
     done: "Looked for a tool",
+    answersTheModel: true,
+  },
+  [RECALL_EARLIER_RESULTS]: {
+    running: "Rereading an earlier result",
+    done: "Reread an earlier result",
     answersTheModel: true,
   },
   // Claude Code's own search over the tools a Claude Agent SDK Bot holds, the same step as the one

@@ -31,6 +31,7 @@ import { StarPrompt } from "@/components/star-prompt/star-prompt";
 import { deleteAttachment } from "@/lib/api/generated/conversations/conversations";
 import { idempotencyKey, organizationId } from "@/lib/api/request";
 import type { ComposerAttachmentLimits } from "@/lib/deployment/queries";
+import type { Failure } from "@/lib/load-failure";
 import { useNotificationPermission } from "@/lib/notifications/permission";
 import { newId } from "../../lib/new-id";
 
@@ -54,6 +55,7 @@ export function ConversationView({
   autoFocus = false,
   stopped,
   refusals,
+  stoppedNotice,
   onCarryOn,
   working,
   stoppable,
@@ -66,6 +68,7 @@ export function ConversationView({
   voiceCall,
   modelPicker,
   routine,
+  draftKey,
 }: {
   messages: readonly Message[];
   threadId?: string;
@@ -111,9 +114,11 @@ export function ConversationView({
   /** Focus the composer the moment it can take a caret; forwarded to the composer. */
   autoFocus?: boolean;
   /** Why the last turn ended without an answer. Drawn at the end of the transcript, not here. */
-  stopped?: string;
+  stopped?: Failure;
   /** Turns the server refused, each under its own message; see the transcript's `refusals`. */
   refusals?: ReadonlyMap<string, string>;
+  /** Drawn under `stopped`, or else the latest refusal (the transcript's `stoppedNotice`). */
+  stoppedNotice?: ReactNode;
   /** Carry on with a turn that was cut off part way; a button beside `stopped`. */
   onCarryOn?: () => void;
   /** Work the conversation waits on that is not this tab's run. Drawn at the end of the transcript. */
@@ -157,6 +162,8 @@ export function ConversationView({
   modelPicker?: ReactNode;
   /** The Bot and conversation for the composer's routine clock. See `Composer`. */
   routine?: { agentId: string; channelId: string };
+  /** Which conversation's unsent message the composer keeps. See `Composer`. */
+  draftKey?: string;
 }) {
   /*
    * THE QUEUE LIVES HERE BECAUSE BOTH HALVES OF IT DO.
@@ -552,6 +559,7 @@ export function ConversationView({
           restoring={restoring}
           {...(stopped ? { stopped } : {})}
           {...(refusals ? { refusals } : {})}
+          {...((stopped || refusals) && stoppedNotice ? { stoppedNotice } : {})}
           {...(stopped && onCarryOn && !disabled ? { onCarryOn } : {})}
           working={working}
         />
@@ -618,7 +626,7 @@ export function ConversationView({
          */}
         {attached ? (
           <div
-            className="mx-5 -mb-4 rounded-t-2xl border border-border border-b-0 bg-muted pb-4"
+            className="mx-5 -mb-4 rounded-t-xl border border-border border-b-0 bg-muted pb-4"
             data-slot="composer-drawer"
           >
             {attached}
@@ -629,6 +637,7 @@ export function ConversationView({
         <Composer
           modelPicker={modelPicker}
           {...(routine ? { routine } : {})}
+          {...(draftKey ? { draftKey } : {})}
           agents={agents}
           autoFocus={autoFocus}
           {...(channelId ? { channelId } : {})}

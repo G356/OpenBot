@@ -10,6 +10,7 @@ import {
 import type { AddAppFromDirectory, App } from "@/lib/api/generated/model";
 import { idempotencyKey, organizationId } from "@/lib/api/request";
 import { ClientError } from "@/lib/client";
+import type { Failure } from "@/lib/load-failure";
 import { invalidatePlugins } from "@/lib/plugins/mutations";
 import type { SharedUseApproval } from "@/lib/plugins/shared-use";
 
@@ -69,7 +70,8 @@ export type AddServerByUrlOutcome =
   | { added: true; server: App; signIn: boolean }
   | {
       added: false;
-      error: string;
+      /** The refusal kept whole, not as its words, so a hold is drawn calmly (`failureSaid`). */
+      error: Failure;
       /** `needs-key` or `not-approved`, when the refusal is one the screen can offer a step for. */
       code?: "needs-key" | "not-approved";
       /** The app already added at this address, when that is why. */
@@ -103,7 +105,7 @@ export function addServerByUrlMutationOptions(queryClient: QueryClient) {
         if (!(thrown instanceof ClientError)) throw thrown;
         return {
           added: false,
-          error: thrown.message,
+          error: thrown,
           ...(thrown.code === "APP_NEEDS_KEY"
             ? { code: "needs-key" as const }
             : thrown.code === "APP_NOT_APPROVED"
@@ -228,6 +230,25 @@ export function setOwnerGrantsMutationOptions(queryClient: QueryClient) {
         { ownerGrants: variables.ownerGrants },
         { "Idempotency-Key": idempotencyKey() },
         { fallback: "Couldn't change who can give this app." },
+      );
+    },
+    onSettled: () => invalidatePlugins(queryClient),
+  });
+}
+
+/**
+ * Give an app to every Bot in the organization, Bots made later included, or take back what giving
+ * it to every Bot gave (updateApp). What a Bot was given any other way stays. An admin's.
+ */
+export function setEveryBotMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (variables: { serverId: string; everyBot: boolean }) => {
+      await updateApp(
+        organizationId(),
+        variables.serverId,
+        { everyBot: variables.everyBot },
+        { "Idempotency-Key": idempotencyKey() },
+        { fallback: "Couldn't change which Bots can use this app." },
       );
     },
     onSettled: () => invalidatePlugins(queryClient),

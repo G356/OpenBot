@@ -22,6 +22,11 @@ import {
 } from "@/components/layout/page-shell";
 import { AiConnectionRow } from "@/components/settings/ai-connection";
 import { ProviderTile } from "@/components/settings/ai-connection-chooser";
+import {
+  AiConnectionRows,
+  SEVERAL,
+  SEVERAL_FOR_THE_ORGANIZATION,
+} from "@/components/settings/ai-connection-list";
 import { teamPaths } from "@/components/teams/team-paths";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -49,6 +54,7 @@ import { providerById } from "@/lib/ai-connection/providers";
 import {
   type AiConnection,
   aiConnectionQueryOptions,
+  aiConnectionsQueryOptions,
   desktopAiSupportQueryOptions,
   type PersonalAiConnection,
   personalAiConnectionQueryOptions,
@@ -57,6 +63,7 @@ import {
   enterpriseOverviewQueryOptions,
   modelUsageQueryOptions,
 } from "@/lib/enterprise/queries";
+import { failureSaid, loadFailure } from "@/lib/load-failure";
 import { markFor } from "@/lib/marks";
 import { effortLabel } from "@/lib/models/effort";
 import { modelLabel, modelNamer } from "@/lib/models/names";
@@ -111,27 +118,50 @@ export function ProviderSection() {
   const connection = useQuery(aiConnectionQueryOptions());
   const support = useQuery(desktopAiSupportQueryOptions());
   const personal = useQuery(personalAiConnectionQueryOptions());
-  if (connection.isPending || support.isPending || personal.isPending)
+  const list = useQuery(aiConnectionsQueryOptions("organization"));
+  if (
+    connection.isPending ||
+    support.isPending ||
+    personal.isPending ||
+    list.isPending
+  )
     return null;
+  // Several connections, where the server lists them; the one row it had before otherwise.
+  const listed =
+    list.data &&
+    list.data.connections.length > 0 &&
+    connection.data?.editable &&
+    support.data !== "older"
+      ? list.data
+      : null;
   // Each person brings their own AI here (OpenBot Cloud): the server's verdict, never guessed.
   const cloud = personal.data?.available === true;
   return (
     <>
       <PageSection
-        description={
+        description={`${
           cloud
             ? "Bots use it for everyone in your organization who hasn't connected their own AI."
             : "Built-in Bots and the framework picked at setup run on this provider."
-        }
+        }${listed && listed.connections.length > 1 ? ` ${cloud ? SEVERAL_FOR_THE_ORGANIZATION : SEVERAL}` : ""}`}
         title={cloud ? "Organization's AI" : "AI provider"}
       >
         {connection.error ? (
           <p className="mt-4 text-destructive text-sm" role="alert">
-            Couldn't load the AI connection. Try again in a moment.
+            {loadFailure(
+              connection.error,
+              "Couldn't load the AI connection. Try again in a moment.",
+            )}
           </p>
         ) : connection.data === null ? (
           // An OpenBot older than the AI connection: what the model listing says serves it.
           <CatalogueProviderRow />
+        ) : listed ? (
+          <AiConnectionRows
+            list={listed}
+            organizationWide={cloud}
+            scope="organization"
+          />
         ) : (
           <PageRows>
             {connection.data.editable && support.data !== "older" ? (
@@ -202,7 +232,7 @@ function ViewerAiSection({ personal }: { personal: PersonalAiConnection }) {
       title="Your AI"
     >
       <PageRows>
-        <Item render={<Link hash="your-ai" to="/settings" />} size="sm">
+        <Item render={<Link to="/settings/providers" />} size="sm">
           {described ? (
             <ProviderTile
               provider={providerById(personal.connection.provider)}
@@ -248,7 +278,10 @@ function CatalogueProviderRow() {
   if (available.error)
     return (
       <p className="mt-4 text-destructive text-sm" role="alert">
-        Couldn't load the provider. Try again in a moment.
+        {loadFailure(
+          available.error,
+          "Couldn't load the provider. Try again in a moment.",
+        )}
       </p>
     );
   return <ProviderRow listing={available.data} />;
@@ -344,7 +377,7 @@ export function ModelChoiceSection() {
         allowed={
           allowlist && allowlistNarrows(allowlist) ? allowlist.models : null
         }
-        failed={overview.error !== null}
+        failed={overview.error}
       />
     );
   // Open unless an admin narrowed it: one person, or a team whose allowlist narrows nothing.
@@ -373,7 +406,10 @@ export function ModelChoiceSection() {
     >
       {overview.error ? (
         <p className="mt-4 text-destructive text-sm" role="alert">
-          Couldn't load these settings. Try again in a moment.
+          {loadFailure(
+            overview.error,
+            "Couldn't load these settings. Try again in a moment.",
+          )}
         </p>
       ) : (
         <PageRows>
@@ -415,7 +451,8 @@ function OwnModelsChoice({
 }: {
   /** The models an admin allowed, when the allowlist narrows anything. Null while it is open. */
   allowed: readonly string[] | null;
-  failed: boolean;
+  /** Why the settings couldn't be read, or null when they were. */
+  failed: unknown;
 }) {
   return (
     <PageSection
@@ -428,7 +465,10 @@ function OwnModelsChoice({
     >
       {failed ? (
         <p className="mt-4 text-destructive text-sm" role="alert">
-          Couldn't load these settings. Try again in a moment.
+          {loadFailure(
+            failed,
+            "Couldn't load these settings. Try again in a moment.",
+          )}
         </p>
       ) : (
         <PageRows>
@@ -720,7 +760,7 @@ export function AllowedModelsDialog({
             </p>
           ) : available.isPending ? null : available.error ? (
             <p className="text-destructive text-sm" role="alert">
-              {available.error.message}
+              {failureSaid(available.error)}
             </p>
           ) : !available.data.listed ? (
             <p className="text-muted-foreground text-sm">
@@ -729,8 +769,9 @@ export function AllowedModelsDialog({
             </p>
           ) : null}
           {rows.length === 0 ? (
-            // With nothing listed and nothing searched for, the note above says why.
-            listsModels || needle ? (
+            // With nothing listed and nothing searched for, the note above says why. A listing that
+            // is still on its way, or couldn't be read, is no answer to a search either.
+            (listsModels ? available.data !== undefined : needle) ? (
               <PageEmpty icon={IconSearch} title="No matches" />
             ) : null
           ) : (
@@ -889,7 +930,10 @@ export function ModelUsageSection({ team }: { team: boolean }) {
     >
       {usage.isPending ? null : usage.error ? (
         <p className="mt-4 text-destructive text-sm" role="alert">
-          Couldn't load model usage. Try again in a moment.
+          {loadFailure(
+            usage.error,
+            "Couldn't load model usage. Try again in a moment.",
+          )}
         </p>
       ) : usage.data.summary.length === 0 ? (
         <PageEmpty icon={IconChartBar} title="No recent runs">
